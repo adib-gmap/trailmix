@@ -1,0 +1,14 @@
+# Build products
+.build/
+dist/
+
+# SwiftPM / Xcode local state
+.swiftpm/
+*.xcodeproj/
+*.xcworkspace/
+
+# Working notes, deliberately untracked
+STATUS.md
+CLAUDE.md
+
+.DS_Store

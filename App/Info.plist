@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleIdentifier</key>
+    <string>io.github.stephenturner.trailmix</string>
+    <key>CFBundleName</key>
+    <string>Trailmix</string>
+    <key>CFBundleDisplayName</key>
+    <string>Trailmix</string>
+    <key>CFBundleExecutable</key>
+    <string>trailmix</string>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleInfoDictionaryVersion</key>
+    <string>6.0</string>
+    <key>CFBundleShortVersionString</key>
+    <string>0.1.0</string>
+    <!-- Stamped from `git describe` by the Makefile at package time. -->
+    <key>CFBundleVersion</key>
+    <string>0.1.0</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>15.0</string>
+    <!-- Menu-bar only: no Dock tile, no app switcher entry. Matches the
+         setActivationPolicy(.accessory) call in Run.runMain, but applies from
+         the moment of launch rather than after the process is up, so there's
+         no Dock icon flash on start. -->
+    <key>LSUIElement</key>
+    <true/>
+    <key>NSHumanReadableCopyright</key>
+    <string>MIT licensed. Everything stays on this Mac.</string>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>Trailmix records your microphone during meetings so you can transcribe them later. Audio never leaves this Mac.</string>
+    <key>NSAudioCaptureUsageDescription</key>
+    <string>Trailmix records system audio (the other side of your meetings) so you can transcribe them later. Audio never leaves this Mac.</string>
+</dict>
+</plist>
