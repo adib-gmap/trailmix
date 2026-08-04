@@ -26,7 +26,7 @@ struct Trailmix: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "trailmix",
         abstract: "Local recorder + transcriber. Captures computer audio, microphone, and a window or display, then transcribes on-device.",
-        subcommands: [Run.self, Doctor.self],
+        subcommands: [Run.self, Doctor.self, Mic.self],
         defaultSubcommand: Run.self
     )
 }
@@ -200,7 +200,7 @@ final class AppController {
     }
 
     /// Stop any live session cleanly (finalizing files) and exit. Termination
-    /// waits on the stop: screen.mov needs a finalization pass, so quitting
+    /// waits on the stop: the video needs a finalization pass, so quitting
     /// before it completes leaves an unplayable video.
     func shutdown() {
         guard !terminating else { return }
@@ -309,6 +309,7 @@ final class AppController {
         // "transcript ready" notification invites the user into the folder.
         Task { [transcription] in
             await Mixdown.run(in: dir)
+            await Remux.mixedAudioIntoVideo(in: dir)
             await transcription.enqueue(dir)
         }
     }

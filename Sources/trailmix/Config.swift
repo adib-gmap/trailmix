@@ -7,6 +7,7 @@ import Foundation
 ///       "sources": { "computer_audio": true, "microphone": true },
 ///       "capture": { "mode": "none", "display_id": null, "fps": 30, "codec": "hevc" },
 ///       "transcription": { "enabled": true, "engine": "parakeet" },
+///       "echo_cancellation": true,
 ///       "on_stop": "my-hook"
 ///     }
 ///
@@ -53,6 +54,10 @@ struct Config: Sendable {
     var capture: Capture
     var transcriptionEnabled: Bool
     var transcriptionEngine: String
+    /// Route the mic through the voice-processing IO unit so system audio
+    /// playing through the speakers doesn't land in the mic track too. Off
+    /// puts the mic back on ScreenCaptureKit, raw and un-gained.
+    var echoCancellation: Bool
     var onStop: String?
 
     static let path = FileManager.default.homeDirectoryForCurrentUser
@@ -70,6 +75,7 @@ struct Config: Sendable {
         capture: .default,
         transcriptionEnabled: true,
         transcriptionEngine: "parakeet",
+        echoCancellation: true,
         onStop: nil
     )
 
@@ -117,6 +123,9 @@ struct Config: Sendable {
                 transcription["enabled"] as? Bool ?? config.transcriptionEnabled
             config.transcriptionEngine =
                 transcription["engine"] as? String ?? config.transcriptionEngine
+        }
+        if let echo = json["echo_cancellation"] as? Bool {
+            config.echoCancellation = echo
         }
         if let cmd = json["on_stop"] as? String, !cmd.isEmpty {
             config.onStop = cmd

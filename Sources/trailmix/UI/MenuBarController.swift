@@ -31,13 +31,11 @@ final class MenuBarController: NSObject {
     private let toggleItem: NSMenuItem
     private var warningItems: [NSMenuItem] = []
 
-    private let sourcesItem: NSMenuItem
     private let computerAudioItem: NSMenuItem
     private let microphoneItem: NSMenuItem
     private let captureItem: NSMenuItem
     private let captureMenu: NSMenu
     private let changeFolderItem: NSMenuItem
-    private let loginItem: NSMenuItem
     private let modelItem: NSMenuItem
 
     /// Last enumeration of displays and windows. Shown immediately when the
@@ -73,7 +71,7 @@ final class MenuBarController: NSObject {
         menu.autoenablesItems = false
         self.menu = menu
 
-        stateLabel = NSMenuItem(title: "idle", action: nil, keyEquivalent: "")
+        stateLabel = NSMenuItem(title: "Idle", action: nil, keyEquivalent: "")
         stateLabel.isEnabled = false
         menu.addItem(stateLabel)
 
@@ -84,7 +82,10 @@ final class MenuBarController: NSObject {
 
         menu.addItem(.separator())
 
-        // Sources: two independent checkboxes.
+        // The two audio sources sit directly in the menu rather than behind a
+        // "Sources" submenu. There are only ever two of them, they are the
+        // settings people change most, and a submenu made the common case —
+        // glance at the menu, see what is armed — take a hover and a wait.
         computerAudioItem = NSMenuItem(
             title: "Computer audio",
             action: #selector(computerAudioClicked),
@@ -95,19 +96,16 @@ final class MenuBarController: NSObject {
             action: #selector(microphoneClicked),
             keyEquivalent: ""
         )
-        let sourcesMenu = NSMenu()
-        sourcesMenu.autoenablesItems = false
-        sourcesMenu.addItem(computerAudioItem)
-        sourcesMenu.addItem(microphoneItem)
-        sourcesItem = NSMenuItem(title: "Sources", action: nil, keyEquivalent: "")
-        sourcesItem.submenu = sourcesMenu
-        menu.addItem(sourcesItem)
+        menu.addItem(computerAudioItem)
+        menu.addItem(microphoneItem)
 
-        // Capture: a radio group, populated lazily so that merely opening the
-        // menu doesn't trigger the Screen Recording prompt.
+        // Video Capture: a radio group, populated lazily so that merely opening
+        // the menu doesn't trigger the Screen Recording prompt. Named for what
+        // it selects — it sits beside two audio rows, and "Capture" alone read
+        // like it governed them too.
         captureMenu = NSMenu()
         captureMenu.autoenablesItems = false
-        captureItem = NSMenuItem(title: "Capture", action: nil, keyEquivalent: "")
+        captureItem = NSMenuItem(title: "Video Capture", action: nil, keyEquivalent: "")
         captureItem.submenu = captureMenu
         menu.addItem(captureItem)
 
@@ -144,13 +142,6 @@ final class MenuBarController: NSObject {
         )
         menu.addItem(changeFolderItem)
 
-        loginItem = NSMenuItem(
-            title: "Start at login",
-            action: #selector(loginItemClicked),
-            keyEquivalent: ""
-        )
-        menu.addItem(loginItem)
-
         // Hidden unless the weights are actually missing, so the common case
         // is a menu with no maintenance chore in it.
         modelItem = NSMenuItem(
@@ -174,23 +165,17 @@ final class MenuBarController: NSObject {
 
         for item in [
             toggleItem, openFolder, changeFolderItem, quit,
-            computerAudioItem, microphoneItem, loginItem, modelItem,
+            computerAudioItem, microphoneItem, modelItem,
         ] {
             item.target = self
         }
         captureMenu.delegate = self
-        // The main menu needs a delegate too: launch-at-login can be revoked
-        // from System Settings behind our back, so the checkmark is resynced
-        // every time the menu opens rather than trusted from the last click.
         menu.delegate = self
-        refreshLoginItem()
 
         statusItem.menu = menu
 
         if let button = statusItem.button {
-            let image = Self.statusImage()
-            image?.isTemplate = true
-            button.image = image
+            button.image = Self.idleImage
             button.imagePosition = .imageLeft
         }
 
@@ -213,20 +198,22 @@ final class MenuBarController: NSObject {
     /// recording.
     func update(recording: Bool, elapsed: String?) {
         isRecording = recording
-        stateLabel.title = recording ? "● recording · \(elapsed ?? "0:00")" : "idle"
+        stateLabel.title = recording ? "● Recording · \(elapsed ?? "0:00")" : "Idle"
         toggleItem.title = recording ? "Stop recording" : "Start recording"
         toggleItem.isEnabled = true
+        statusItem.button?.image = recording ? Self.recordingImage : Self.idleImage
         statusItem.button?.contentTintColor = recording ? .systemRed : nil
         applySources()
     }
 
-    /// Capture has stopped but the files aren't closed yet. screen.mov needs a
+    /// Capture has stopped but the files aren't closed yet. The video needs a
     /// finalization pass that can take a moment on a long recording, and the
     /// gap has to look like progress rather than a frozen menu.
     func showFinishing() {
         isRecording = false
-        stateLabel.title = "finishing…"
+        stateLabel.title = "Finishing…"
         toggleItem.title = "Finishing…"
+        statusItem.button?.image = Self.idleImage
         statusItem.button?.contentTintColor = nil
         applySources()
         // applySources() re-enables the toggle whenever sources are non-empty;
@@ -244,7 +231,6 @@ final class MenuBarController: NSObject {
     private func applySources() {
         computerAudioItem.state = sources.computerAudio ? .on : .off
         microphoneItem.state = sources.microphone ? .on : .off
-        sourcesItem.isEnabled = !isRecording
         computerAudioItem.isEnabled = !isRecording
         microphoneItem.isEnabled = !isRecording
         captureItem.isEnabled = !isRecording
@@ -252,12 +238,15 @@ final class MenuBarController: NSObject {
         // mid-recording would split one recording across two places.
         changeFolderItem.isEnabled = !isRecording
 
+        // None is spelled out rather than left blank. A bare "Video Capture"
+        // looks like a heading for the submenu below it, not like a setting
+        // that currently has a value.
         captureItem.title = switch sources.target {
-        case .none: "Capture"
+        case .none: "Video Capture: None"
         case .display(let id):
-            "Capture: \(content.displays.first { $0.id == id }?.name ?? "Display")"
+            "Video Capture: \(content.displays.first { $0.id == id }?.name ?? "Display")"
         case .window(let id):
-            "Capture: \(content.windows.first { $0.id == id }?.label ?? "Window")"
+            "Video Capture: \(content.windows.first { $0.id == id }?.label ?? "Window")"
         }
 
         // Nothing selected means nothing to record.
@@ -307,33 +296,17 @@ final class MenuBarController: NSObject {
     }
 
     // MARK: - Launch at login
-
-    /// Pull the live registration state into the checkmark. Cheap enough to
-    /// call on every menu open, and the only way to notice a change the user
-    /// made in System Settings.
-    private func refreshLoginItem() {
-        loginItem.isEnabled = LoginItem.isAvailable
-        loginItem.state = LoginItem.isEnabled ? .on : .off
-        if !LoginItem.isAvailable {
-            // Running the bare executable out of .build, not the .app.
-            loginItem.title = "Start at login (needs the app bundle)"
-        } else if LoginItem.needsApproval {
-            loginItem.title = "Start at login — approve in Settings…"
-        } else {
-            loginItem.title = "Start at login"
-        }
-    }
-
-    @objc private func loginItemClicked() {
-        // A pending registration can't be toggled, only approved. Send the
-        // user where the switch actually is instead of no-oping.
-        if LoginItem.needsApproval {
-            LoginItem.openSettings()
-        } else {
-            LoginItem.setEnabled(loginItem.state == .off)
-        }
-        refreshLoginItem()
-    }
+    //
+    // No menu row. Launching trailmix is a double-click in ~/Applications and
+    // a login item is a preference, not a control — it earned a permanent row
+    // in a seven-item menu by being easy to build, not by being wanted.
+    //
+    // `LoginItem` is kept whole and still works: SMAppService.mainApp,
+    // including the .requiresApproval branch. Restoring the row is an
+    // NSMenuItem plus the two calls that were here (set the checkmark from
+    // LoginItem.isEnabled on menuNeedsUpdate, toggle it on click). Until then
+    // people can add Trailmix under System Settings > General > Login Items
+    // themselves, which is where macOS puts the switch anyway.
 
     /// Rebuild the Capture submenu from the cached content snapshot.
     private func rebuildCaptureMenu() {
@@ -492,27 +465,91 @@ final class MenuBarController: NSObject {
         }
     }
 
-    // Inlined ridge-line SVG. Keeping it in source means the executable has no
-    // separate resource bundle to install alongside it — true single-binary.
+    // The ridge, in the 24×24 box the icon was drawn in. Kept in source so the
+    // executable has no resource bundle to install alongside it — true
+    // single-binary — and as points rather than the SVG string it used to be,
+    // because the recording variant knocks this shape out of a filled badge
+    // and that needs a real path, not a rasterized image.
     //
     // Filled rather than stroked on purpose. At the 16pt the menu bar actually
     // renders, a 1.5pt stroke breaks up into grey mush and stops reading as a
     // mountain; a solid silhouette survives. One continuous ridge also beats
     // separate peaks, whose gaps close up at that size and turn the mark into
     // a lopsided blob.
-    private static let iconSVG = """
-    <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" \
-    viewBox="0 0 24 24" fill="currentColor" stroke="none">\
-    <path d="M0.6 19.6 8.4 5.4l4.3 7.8 2.6-3.9 8.1 10.3z"/>\
-    </svg>
-    """
+    private static let ridge: [NSPoint] = [
+        NSPoint(x: 0.6, y: 19.6),
+        NSPoint(x: 8.4, y: 5.4),
+        NSPoint(x: 12.7, y: 13.2),
+        NSPoint(x: 15.3, y: 9.3),
+        NSPoint(x: 23.4, y: 19.6),
+    ]
 
-    private static func statusImage() -> NSImage? {
-        guard let data = iconSVG.data(using: .utf8),
-              let image = NSImage(data: data)
-        else { return nil }
-        // Menu-bar status icons are nominally 18pt tall; size the SVG to match.
-        image.size = NSSize(width: 16, height: 16)
+    /// Menu-bar status icons are nominally 18pt tall; 16 leaves breathing room.
+    private static let iconSide: CGFloat = 16
+
+    private static let idleImage = statusImage(recording: false)
+    private static let recordingImage = statusImage(recording: true)
+
+    /// Two states, two silhouettes.
+    ///
+    /// Idle is the ridge alone. Recording knocks the same ridge out of a filled
+    /// slab, so the mark reads inverted — dark where it was light.
+    ///
+    /// Shape, not just colour. The tint was already switching to red, but a red
+    /// mountain and a black mountain are the same object in peripheral vision,
+    /// which is the only vision a menu bar ever gets, and identical to anyone
+    /// who doesn't separate red from black. Inverting the fill changes the
+    /// blob, which registers without being looked at. The red tint stays on top
+    /// of it, so the two cues agree rather than compete.
+    ///
+    /// Still a template image: macOS recolours it for light and dark menu bars,
+    /// and `contentTintColor` is what makes the recording one red.
+    private static func statusImage(recording: Bool) -> NSImage {
+        let side = iconSide
+        let image = NSImage(size: NSSize(width: side, height: side), flipped: true) { _ in
+            let scale = side / 24
+            let mountain = NSBezierPath()
+            mountain.move(to: NSPoint(x: ridge[0].x * scale, y: ridge[0].y * scale))
+            for point in ridge.dropFirst() {
+                mountain.line(to: NSPoint(x: point.x * scale, y: point.y * scale))
+            }
+            mountain.close()
+
+            guard recording else {
+                mountain.fill()
+                return true
+            }
+
+            // The slab stops exactly at the ridge's base line (y 19.6), not at
+            // the bottom of the square. Any lower and a thin bar of ink is left
+            // under the mountain, which at 16pt reads as an underline someone
+            // forgot to delete rather than as ground.
+            NSBezierPath(
+                roundedRect: NSRect(
+                    x: 0,
+                    y: 3.4 * scale,
+                    width: side,
+                    height: (19.6 - 3.4) * scale
+                ),
+                xRadius: 3.0 * scale,
+                yRadius: 3.0 * scale
+            ).fill()
+
+            // Punched out with .clear rather than filled even-odd. Even-odd
+            // also fills whatever part of the ridge falls *outside* the slab —
+            // here the base corners, which poke into the rounded corners and
+            // come back as two red spurs hanging off the badge. Clearing can
+            // only remove, so the mark can never spill past its own outline.
+            if let context = NSGraphicsContext.current?.cgContext {
+                context.saveGState()
+                context.setBlendMode(.clear)
+                context.addPath(mountain.cgPath)
+                context.fillPath()
+                context.restoreGState()
+            }
+            return true
+        }
+        image.isTemplate = true
         return image
     }
 
@@ -533,7 +570,6 @@ extension MenuBarController: NSMenuDelegate {
     /// next open, or sooner via Refresh.
     func menuNeedsUpdate(_ menu: NSMenu) {
         if menu === self.menu {
-            refreshLoginItem()
             onMenuOpen?()
             return
         }

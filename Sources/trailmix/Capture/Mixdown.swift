@@ -13,8 +13,6 @@ import Foundation
 /// a file anyone emails; AVFoundation cannot encode mp3 at all. AAC-in-m4a
 /// double-clicks on macOS and Windows alike and lands around 30 MB an hour.
 enum Mixdown {
-    static let filename = "mixed.m4a"
-
     enum MixError: Error, CustomStringConvertible {
         case noTracks
         case exportUnavailable
@@ -36,13 +34,13 @@ enum Mixdown {
     /// begin on the same buffer and a naive concatenation at zero would drift
     /// them apart by a couple of hundred milliseconds.
     static func run(in dir: URL) async {
-        let existing = dir.appendingPathComponent(filename)
+        let existing = dir.appendingPathComponent(SessionFiles.mixedAudio)
         guard !FileManager.default.fileExists(atPath: existing.path) else { return }
 
         do {
             try await write(in: dir)
-            record(filename, in: dir)
-            Log.info("\(dir.lastPathComponent): wrote \(filename)")
+            record(SessionFiles.mixedAudio, in: dir)
+            Log.info("\(dir.lastPathComponent): wrote \(SessionFiles.mixedAudio)")
         } catch MixError.noTracks {
             // Video-only session. Nothing wrong, nothing to do.
         } catch {
@@ -57,7 +55,7 @@ enum Mixdown {
 
         // One composition track per source. Exporting a multi-track
         // composition to a single-track format is what performs the mix.
-        for (key, name) in [("mic", "mic.caf"), ("system", "system.caf")] {
+        for (key, name) in [("mic", SessionFiles.mic), ("system", SessionFiles.system)] {
             let url = dir.appendingPathComponent(name)
             guard FileManager.default.fileExists(atPath: url.path) else { continue }
 
@@ -92,7 +90,7 @@ enum Mixdown {
             presetName: AVAssetExportPresetAppleM4A
         ) else { throw MixError.exportUnavailable }
 
-        let output = dir.appendingPathComponent(filename)
+        let output = dir.appendingPathComponent(SessionFiles.mixedAudio)
         try? FileManager.default.removeItem(at: output)
         do {
             try await export.export(to: output, as: .m4a)
@@ -103,7 +101,7 @@ enum Mixdown {
 
     private static func startOffsets(in dir: URL) -> [String: Int] {
         guard
-            let data = try? Data(contentsOf: dir.appendingPathComponent("meta.json")),
+            let data = try? Data(contentsOf: dir.appendingPathComponent(SessionFiles.meta)),
             let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
             let offsets = json["start_offset_ms"] as? [String: Int]
         else { return [:] }
@@ -115,7 +113,7 @@ enum Mixdown {
     /// so this is a patch rather than part of the original write — keeping the
     /// menu's "finishing…" window short is worth the extra read.
     private static func record(_ name: String, in dir: URL) {
-        let url = dir.appendingPathComponent("meta.json")
+        let url = dir.appendingPathComponent(SessionFiles.meta)
         guard
             let data = try? Data(contentsOf: url),
             var json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]

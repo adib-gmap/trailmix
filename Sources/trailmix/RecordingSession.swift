@@ -6,7 +6,7 @@ import Foundation
 /// Audio tracks stay separate on purpose. Speech models do better on clean
 /// single-source audio, and mic-vs-system is free two-party diarization,
 /// "mic" vs "system", with no speaker-identification model. Video, when captured, is
-/// muxed with audio into screen.mov so it plays standalone.
+/// muxed with audio into mixed.mp4 so it plays standalone.
 ///
 /// Main-actor isolated: it's created and torn down from AppController, and
 /// pinning it there keeps the non-Sendable session from crossing an isolation
@@ -65,27 +65,27 @@ final class RecordingSession {
         var starts: [String: Date] = [:]
         var files: [String: String] = [:]
         if let writer = stream.systemWriter, writer.wroteAnything {
-            files["system"] = "system.caf"
+            files["system"] = SessionFiles.system
             starts["system"] = writer.firstBufferAt ?? startedAt
         }
         if let writer = stream.micWriter, writer.wroteAnything {
-            files["mic"] = "mic.caf"
+            files["mic"] = SessionFiles.mic
             starts["mic"] = writer.firstBufferAt ?? startedAt
         }
         if sources.target.capturesVideo {
             // Size, not just existence: SCRecordingOutput creates the file when
             // recording starts, so a capture that failed immediately leaves a
-            // zero-byte screen.mov behind. Recording that in meta.json as a
+            // zero-byte video behind. Recording that in meta.json as a
             // video track is how a session ends up promising a video that
             // won't open.
             let size = (try? FileManager.default.attributesOfItem(
                 atPath: stream.videoURL.path
             ))?[.size] as? Int ?? 0
             if size > 0 {
-                files["video"] = "screen.mov"
+                files["video"] = SessionFiles.video
                 starts["video"] = stream.videoStart ?? startedAt
             } else {
-                Log.warn("video was requested but screen.mov is empty or missing")
+                Log.warn("video was requested but \(SessionFiles.video) is empty or missing")
             }
         }
 
@@ -112,7 +112,7 @@ final class RecordingSession {
             withJSONObject: meta,
             options: [.prettyPrinted, .sortedKeys]
         ) {
-            try? data.write(to: dir.appendingPathComponent("meta.json"))
+            try? data.write(to: dir.appendingPathComponent(SessionFiles.meta))
         }
     }
 

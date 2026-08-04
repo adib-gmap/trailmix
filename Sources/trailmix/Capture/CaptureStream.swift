@@ -6,14 +6,21 @@ import ScreenCaptureKit
 /// One ScreenCaptureKit stream feeding up to three consumers:
 ///
 ///     SCStream (single capture, single timebase)
-///     ├── SCRecordingOutput ──────────> screen.mov   video + audio, playable
-///     ├── addStreamOutput(.audio) ────> system.caf   AAC stereo
-///     └── addStreamOutput(.microphone) > mic.caf     AAC mono
+///     ├── SCRecordingOutput ──────────> mixed.mp4    video + system audio
+///     └── addStreamOutput(.audio) ────> system.caf   AAC stereo
 ///
-/// The recording output and the raw stream outputs are independent, so a
-/// playable video and two separately transcribable audio tracks come from one
-/// capture with no double-capturing. Video and both audio tracks share a
-/// timebase, which is the whole reason capture was consolidated onto SCK.
+///     AVAudioEngine (voice processing)
+///     └── input tap ──────────────────> mic.caf      AAC mono, echo-cancelled
+///
+/// The mic used to be a third output on the SCStream, which is tidier but
+/// records the speakers along with the speaker: ScreenCaptureKit hands over
+/// the raw input and has no echo cancellation to ask for. See
+/// `MicrophoneCapture`. Set `echo_cancellation: false` to put it back on the
+/// stream, in which case mixed.mp4 gets the mic muxed in directly and the
+/// diagram above collapses back to one capture.
+///
+/// With echo cancellation on, mixed.mp4 leaves the stream carrying system
+/// audio only, and `Remux` swaps in the mixed track afterwards.
 ///
 /// Note that SCStream always needs a content filter, so audio-only recording
 /// still attaches to a display (see `configuration`) and still requires the
@@ -56,17 +63,23 @@ final class CaptureStream: NSObject, @unchecked Sendable {
     private var recordingOutput: SCRecordingOutput?
     private(set) var systemWriter: AudioTrackWriter?
     private(set) var micWriter: AudioTrackWriter?
+    private var microphone: MicrophoneCapture?
+
+    /// Whether the mic runs on its own voice-processing engine rather than on
+    /// the SCStream. Read once at start so a config edit mid-session can't
+    /// leave the stream configured one way and the teardown expecting another.
+    private let echoCancellation = Config.current.echoCancellation
 
     private let lock = NSLock()
     private var videoStartedAt: Date?
     private var stoppedUnexpectedly: String?
 
     /// Set when the recording output reports the file closed, either way.
-    /// `stopCapture()` returns before screen.mov is finalized, so without
+    /// `stopCapture()` returns before the video is finalized, so without
     /// waiting on this the file may not exist yet when RecordingSession goes
     /// looking for it — which is how a video recording ends up with no video
     /// in meta.json.
-    private let videoFinalized = Flag()
+    private let videoFinalized = Latch()
 
     /// Called if the stream dies on its own (the captured window closed, the
     /// display was detached, a config change). Delivered on the main queue.
@@ -79,7 +92,7 @@ final class CaptureStream: NSObject, @unchecked Sendable {
         super.init()
     }
 
-    var videoURL: URL { dir.appendingPathComponent("screen.mov") }
+    var videoURL: URL { dir.appendingPathComponent(SessionFiles.video) }
 
     /// Wall-clock start of the video track, or nil if video wasn't captured.
     var videoStart: Date? {
@@ -106,7 +119,7 @@ final class CaptureStream: NSObject, @unchecked Sendable {
 
         if sources.computerAudio {
             let writer = AudioTrackWriter(
-                url: dir.appendingPathComponent("system.caf"),
+                url: dir.appendingPathComponent(SessionFiles.system),
                 downmixToMono: false
             )
             systemWriter = writer
@@ -114,11 +127,19 @@ final class CaptureStream: NSObject, @unchecked Sendable {
         }
         if sources.microphone {
             let writer = AudioTrackWriter(
-                url: dir.appendingPathComponent("mic.caf"),
+                url: dir.appendingPathComponent(SessionFiles.mic),
                 downmixToMono: true
             )
             micWriter = writer
-            try stream.addStreamOutput(self, type: .microphone, sampleHandlerQueue: sampleQueue)
+            if echoCancellation {
+                // Off the SCStream entirely — ScreenCaptureKit has no way to
+                // ask for echo cancellation, so the mic runs on its own engine.
+                microphone = MicrophoneCapture(writer: writer)
+            } else {
+                try stream.addStreamOutput(
+                    self, type: .microphone, sampleHandlerQueue: sampleQueue
+                )
+            }
         }
         if sources.target.capturesVideo {
             // Screen samples must be consumed for the recording output to
@@ -128,6 +149,23 @@ final class CaptureStream: NSObject, @unchecked Sendable {
         }
 
         try await stream.startCapture()
+
+        // After the stream, not before: a mic engine left running because the
+        // stream failed to start is a live microphone with nothing recording
+        // it. Failure here is reported but not fatal — a session with system
+        // audio and video is worth more than no session.
+        if let microphone {
+            do {
+                try microphone.start()
+            } catch {
+                Log.warn("microphone capture failed to start: \(error)")
+                notifyUser(
+                    title: "trailmix — microphone unavailable",
+                    body: "recording without it. \(error)"
+                )
+                self.microphone = nil
+            }
+        }
     }
 
     /// Stop capture and finalize every output. Idempotent.
@@ -139,7 +177,12 @@ final class CaptureStream: NSObject, @unchecked Sendable {
         guard let stream else { return }
         self.stream = nil
 
-        // stopCapture() alone finalizes screen.mov: "If stopCapture is called
+        // The mic engine is independent of the stream, so it comes down first
+        // and on its own. Its writer is closed below with the others.
+        microphone?.stop()
+        microphone = nil
+
+        // stopCapture() alone finalizes the video: "If stopCapture is called
         // without removing recordingOutput, recording will be stopped and
         // finish writing into the file" (SCStream.h). Removing the output
         // first, as this used to, starts a *second* finalization down a path
@@ -148,7 +191,7 @@ final class CaptureStream: NSObject, @unchecked Sendable {
         //
         // It runs detached because a stop that blocks must not block the
         // caller. Abandoning it leaks at most one task per stuck stop.
-        let stopped = Flag()
+        let stopped = Latch()
         Task.detached(priority: .userInitiated) {
             do {
                 try await stream.stopCapture()
@@ -166,7 +209,7 @@ final class CaptureStream: NSObject, @unchecked Sendable {
         if recordingOutput != nil {
             // The file is closed asynchronously after capture stops.
             if await !videoFinalized.wait(upTo: 10) {
-                Log.warn("screen.mov didn't finalize within 10s — it may not be playable")
+                Log.warn("\(SessionFiles.video) didn't finalize within 10s — it may not be playable")
             }
             recordingOutput = nil
         }
@@ -180,7 +223,19 @@ final class CaptureStream: NSObject, @unchecked Sendable {
     private func addRecordingOutput(to stream: SCStream) throws {
         let config = SCRecordingOutputConfiguration()
         config.outputURL = videoURL
-        config.outputFileType = .mov
+        // mp4 rather than mov. Both are offered and mov is the more Mac-native
+        // of the two, but the point of this file is that someone can open it
+        // — the same reason the audio mix is m4a and not caf. mp4 plays on
+        // Windows, Android, and in a browser without help; .mov outside macOS
+        // means "find VLC". It is also SCRecordingOutput's own default.
+        //
+        // The container is only half of that promise: HEVC inside mp4 still
+        // needs a codec Windows does not always ship. `"codec": "h264"` in the
+        // config is the lever for anyone who cares more about playing
+        // everywhere than about halving the file size.
+        if config.availableOutputFileTypes.contains(.mp4) {
+            config.outputFileType = .mp4
+        }
         // HEVC roughly halves the file for screen content. Fall back if the
         // system doesn't offer it.
         let preferred: AVVideoCodecType = capture.codec == "h264" ? .h264 : .hevc
@@ -197,7 +252,11 @@ final class CaptureStream: NSObject, @unchecked Sendable {
         config.capturesAudio = sources.computerAudio
         // Keeps trailmix's own notification sounds out of the recording.
         config.excludesCurrentProcessAudio = true
-        if sources.microphone {
+        // Only when the mic is on the stream. With echo cancellation it comes
+        // from MicrophoneCapture instead, and asking ScreenCaptureKit for it
+        // as well would open the device twice and mux the raw, echoing signal
+        // into the video.
+        if sources.microphone, !echoCancellation {
             config.captureMicrophone = true
         }
 
@@ -226,6 +285,23 @@ final class CaptureStream: NSObject, @unchecked Sendable {
         return config
     }
 
+    /// The filter decides what video is captured *and*, as a side effect,
+    /// whose audio is captured.
+    ///
+    /// ScreenCaptureKit scopes audio at the app level and never at the window
+    /// level — "when a single window filter is used, all the audio content
+    /// from the application that contains the window will be captured, even
+    /// from those windows that are not present in the video output" (WWDC22,
+    /// Take ScreenCaptureKit to the Next Level). So:
+    ///
+    ///   - `.none` and `.display` build display filters, and system.caf gets
+    ///     every app on the machine except trailmix.
+    ///   - `.window` gets that window's owning application and nothing else.
+    ///     Record a Firefox window during a Zoom call and system.caf is
+    ///     silent, with no error anywhere to say why.
+    ///
+    /// Decoupling the two would take a second SCStream, one filtered for
+    /// video and one for audio. See the backlog in STATUS.md.
     private func contentFilter() async throws -> SCContentFilter {
         let content: SCShareableContent
         do {
@@ -335,7 +411,7 @@ extension CaptureStream: SCStreamDelegate {
 
 extension CaptureStream: SCRecordingOutputDelegate {
     func recordingOutputDidStartRecording(_ recordingOutput: SCRecordingOutput) {
-        Log.info("screen.mov: recording started")
+        Log.info("\(SessionFiles.video): recording started")
     }
 
     func recordingOutputDidFinishRecording(_ recordingOutput: SCRecordingOutput) {
@@ -361,7 +437,7 @@ extension CaptureStream: SCRecordingOutputDelegate {
 /// that may never arrive. A continuation would be tidier, but it has to be
 /// resumed exactly once and these callbacks carry no such guarantee; polling a
 /// flag can't trap the process by being resumed twice or never.
-final class Flag: @unchecked Sendable {
+final class Latch: @unchecked Sendable {
     private let lock = NSLock()
     private var value = false
 

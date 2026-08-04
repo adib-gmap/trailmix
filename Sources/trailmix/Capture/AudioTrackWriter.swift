@@ -69,14 +69,38 @@ final class AudioTrackWriter: @unchecked Sendable {
         return firstBuffer != nil
     }
 
-    /// Append one sample buffer. Called on the stream's sample-handler queue.
-    /// The output file is created lazily from the first buffer's format, since
-    /// ScreenCaptureKit reports the mic's format only once samples flow.
+    /// Append one ScreenCaptureKit sample buffer, from the stream's
+    /// sample-handler queue.
     func append(_ sampleBuffer: CMSampleBuffer) {
         guard sampleBuffer.isValid, sampleBuffer.numSamples > 0 else { return }
         guard let sourceFormat = sampleBuffer.formatDescription
             .flatMap({ AVAudioFormat(cmAudioFormatDescription: $0) })
         else { return }
+
+        let source: AVAudioPCMBuffer
+        do {
+            source = try Self.pcmBuffer(from: sampleBuffer, format: sourceFormat)
+        } catch {
+            lock.lock()
+            reportOnce("track write failed: \(error)")
+            lock.unlock()
+            return
+        }
+        append(source)
+    }
+
+    /// Append one PCM buffer, from an AVAudioEngine tap.
+    ///
+    /// The output file is created lazily from the first buffer's format:
+    /// neither ScreenCaptureKit nor a voice-processing input node commits to
+    /// one until samples actually flow.
+    ///
+    /// Note that `firstBuffer` is set here rather than on the way in, so a
+    /// track whose every buffer fails to convert never counts as having
+    /// written anything. That is what stops a header-only file from being
+    /// listed in meta.json as a real track.
+    func append(_ source: AVAudioPCMBuffer) {
+        guard source.frameLength > 0 else { return }
 
         lock.lock()
         defer { lock.unlock() }
@@ -84,7 +108,7 @@ final class AudioTrackWriter: @unchecked Sendable {
         if firstBuffer == nil { firstBuffer = Date() }
         if file == nil {
             do {
-                try openFile(sourceFormat: sourceFormat)
+                try openFile(sourceFormat: source.format)
             } catch {
                 reportOnce("track open failed: \(error)")
                 return
@@ -93,7 +117,6 @@ final class AudioTrackWriter: @unchecked Sendable {
         guard let file, let outputFormat else { return }
 
         do {
-            let source = try Self.pcmBuffer(from: sampleBuffer, format: sourceFormat)
             if let converter {
                 guard let converted = AVAudioPCMBuffer(
                     pcmFormat: outputFormat,

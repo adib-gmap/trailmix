@@ -6,7 +6,7 @@ import Foundation
 /// its start offset, merged by timestamp, and written as transcript.json
 /// (canonical) plus transcript.md.txt (readable). The filesystem is the queue —
 /// `resumePending()` rescans at launch, so a crash or quit mid-transcription
-/// just retries on next run. Failures append to the session's transcribe.log
+/// just retries on next run. Failures append to the session's transcript.log
 /// and never block later jobs.
 actor TranscriptionCoordinator {
     enum Status: Sendable {
@@ -63,16 +63,16 @@ actor TranscriptionCoordinator {
         let fm = FileManager.default
         var pending: [URL] = []
         for dir in entries {
-            if fm.fileExists(atPath: dir.appendingPathComponent("transcript.json").path) {
+            if fm.fileExists(atPath: dir.appendingPathComponent(SessionFiles.transcript).path) {
                 continue
             }
-            if fm.fileExists(atPath: dir.appendingPathComponent("meta.json").path) {
+            if fm.fileExists(atPath: dir.appendingPathComponent(SessionFiles.meta).path) {
                 pending.append(dir)
             } else if !sessionFiles(in: dir).isEmpty {
                 // No meta.json means the process died before it could stop
                 // cleanly. The audio is still good — CAF needs no finalization
                 // pass — so recover it rather than orphaning it forever.
-                // (screen.mov will be unplayable in that case; MOV does need
+                // (the video will be unplayable in that case; mp4 does need
                 // finalizing. It's still recorded in the metadata.)
                 pending.append(dir)
             }
@@ -81,7 +81,7 @@ actor TranscriptionCoordinator {
 
         var resumed = 0
         for dir in pending where !queue.contains(dir) {
-            if !fm.fileExists(atPath: dir.appendingPathComponent("meta.json").path) {
+            if !fm.fileExists(atPath: dir.appendingPathComponent(SessionFiles.meta).path) {
                 do {
                     try recoverMeta(at: dir)
                     log(dir, "recovered meta.json — session never stopped cleanly")
@@ -107,7 +107,7 @@ actor TranscriptionCoordinator {
     /// the way meta.json keys them.
     private func audioTracks(in dir: URL) -> [String: String] {
         let fm = FileManager.default
-        return ["mic": "mic.caf", "system": "system.caf"].filter {
+        return ["mic": SessionFiles.mic, "system": SessionFiles.system].filter {
             fm.fileExists(atPath: dir.appendingPathComponent($0.value).path)
         }
     }
@@ -117,9 +117,11 @@ actor TranscriptionCoordinator {
     /// .caf files at all, and judging by audio alone would orphan it forever.
     private func sessionFiles(in dir: URL) -> [String: String] {
         var files = audioTracks(in: dir)
-        let video = "screen.mov"
-        if FileManager.default.fileExists(atPath: dir.appendingPathComponent(video).path) {
-            files["video"] = video
+        // Whichever name the video was written under — a session recorded
+        // before the rename still has screen.mov, and judging it by the
+        // current name alone would orphan it.
+        if let video = SessionFiles.video(in: dir) {
+            files["video"] = video.lastPathComponent
         }
         return files
     }
@@ -140,7 +142,7 @@ actor TranscriptionCoordinator {
         // date is the real session start. Duration comes from the audio itself
         // rather than file timestamps, which only bound when writing stopped.
         let started = (try? fm.attributesOfItem(atPath: dir.path))?[.creationDate] as? Date
-        // Audio only: AVAudioFile can't read screen.mov, and a hard-killed one
+        // Audio only: AVAudioFile can't read the video, and a hard-killed one
         // is unfinalized anyway, so its duration is unknowable here.
         let duration = audio.values
             .compactMap { name -> TimeInterval? in
@@ -172,7 +174,7 @@ actor TranscriptionCoordinator {
             withJSONObject: meta,
             options: [.prettyPrinted, .sortedKeys]
         )
-        try data.write(to: dir.appendingPathComponent("meta.json"), options: .atomic)
+        try data.write(to: dir.appendingPathComponent(SessionFiles.meta), options: .atomic)
     }
 
     // MARK: -
@@ -201,7 +203,7 @@ actor TranscriptionCoordinator {
                 lastFailure = dir.lastPathComponent
                 notifyUser(
                     title: "trailmix — transcription failed",
-                    body: "\(dir.lastPathComponent) — see transcribe.log",
+                    body: "\(dir.lastPathComponent) — see \(SessionFiles.transcriptLog)",
                     reveal: dir
                 )
             }
@@ -293,7 +295,7 @@ actor TranscriptionCoordinator {
     private func log(_ dir: URL, _ message: String) {
         Log.info("\(dir.lastPathComponent): \(message)")
         let line = "\(ISO8601DateFormatter().string(from: Date())) \(message)\n"
-        let url = dir.appendingPathComponent("transcribe.log")
+        let url = dir.appendingPathComponent(SessionFiles.transcriptLog)
         if let handle = FileHandle(forWritingAtPath: url.path) {
             handle.seekToEndOfFile()
             handle.write(Data(line.utf8))
@@ -330,7 +332,7 @@ private struct SessionMeta {
     }
 
     static func read(from dir: URL) throws -> SessionMeta {
-        let url = dir.appendingPathComponent("meta.json")
+        let url = dir.appendingPathComponent(SessionFiles.meta)
         guard
             let data = try? Data(contentsOf: url),
             let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
@@ -383,9 +385,9 @@ private struct Transcript: Codable {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         try encoder.encode(self)
-            .write(to: dir.appendingPathComponent("transcript.json"), options: .atomic)
+            .write(to: dir.appendingPathComponent(SessionFiles.transcript), options: .atomic)
         try Data(rendered(title: dir.lastPathComponent).utf8)
-            .write(to: dir.appendingPathComponent("transcript.md.txt"), options: .atomic)
+            .write(to: dir.appendingPathComponent(SessionFiles.readableTranscript), options: .atomic)
     }
 
     private func rendered(title: String) -> String {
