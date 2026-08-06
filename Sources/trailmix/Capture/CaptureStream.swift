@@ -41,7 +41,7 @@ final class CaptureStream: NSObject, @unchecked Sendable {
             case .windowUnavailable:
                 return "the selected window is gone"
             case .noShareableContent(let e):
-                return "can't read shareable content (\(e)) — check System Settings → Privacy & Security → Screen Recording"
+                return "can't read shareable content (\(e)). Check System Settings → Privacy & Security → Screen Recording"
             }
         }
     }
@@ -57,7 +57,7 @@ final class CaptureStream: NSObject, @unchecked Sendable {
     private let sources: Sources
     private let capture: Config.Capture
     private let dir: URL
-    private let sampleQueue = DispatchQueue(label: "io.github.stephenturner.trailmix.capture-samples")
+    private let sampleQueue = DispatchQueue(label: "us.stephenturner.trailmix.capture-samples")
 
     private var stream: SCStream?
     private var recordingOutput: SCRecordingOutput?
@@ -77,7 +77,7 @@ final class CaptureStream: NSObject, @unchecked Sendable {
     /// Set when the recording output reports the file closed, either way.
     /// `stopCapture()` returns before the video is finalized, so without
     /// waiting on this the file may not exist yet when RecordingSession goes
-    /// looking for it — which is how a video recording ends up with no video
+    /// looking for it. That is how a video recording ends up with no video
     /// in meta.json.
     private let videoFinalized = Latch()
 
@@ -132,8 +132,8 @@ final class CaptureStream: NSObject, @unchecked Sendable {
             )
             micWriter = writer
             if echoCancellation {
-                // Off the SCStream entirely — ScreenCaptureKit has no way to
-                // ask for echo cancellation, so the mic runs on its own engine.
+                // Off the SCStream entirely, since ScreenCaptureKit has no way
+                // to ask for echo cancellation. The mic runs on its own engine.
                 microphone = MicrophoneCapture(writer: writer)
             } else {
                 try stream.addStreamOutput(
@@ -152,7 +152,7 @@ final class CaptureStream: NSObject, @unchecked Sendable {
 
         // After the stream, not before: a mic engine left running because the
         // stream failed to start is a live microphone with nothing recording
-        // it. Failure here is reported but not fatal — a session with system
+        // it. Failure here is reported but not fatal: a session with system
         // audio and video is worth more than no session.
         if let microphone {
             do {
@@ -160,7 +160,7 @@ final class CaptureStream: NSObject, @unchecked Sendable {
             } catch {
                 Log.warn("microphone capture failed to start: \(error)")
                 notifyUser(
-                    title: "trailmix — microphone unavailable",
+                    title: "trailmix: microphone unavailable",
                     body: "recording without it. \(error)"
                 )
                 self.microphone = nil
@@ -203,13 +203,13 @@ final class CaptureStream: NSObject, @unchecked Sendable {
             stopped.set()
         }
         if await !stopped.wait(upTo: 5) {
-            Log.warn("stopCapture() didn't return within 5s — continuing")
+            Log.warn("stopCapture() didn't return within 5s, continuing")
         }
 
         if recordingOutput != nil {
             // The file is closed asynchronously after capture stops.
             if await !videoFinalized.wait(upTo: 10) {
-                Log.warn("\(SessionFiles.video) didn't finalize within 10s — it may not be playable")
+                Log.warn("\(SessionFiles.video) didn't finalize within 10s, it may not be playable")
             }
             recordingOutput = nil
         }
@@ -224,8 +224,8 @@ final class CaptureStream: NSObject, @unchecked Sendable {
         let config = SCRecordingOutputConfiguration()
         config.outputURL = videoURL
         // mp4 rather than mov. Both are offered and mov is the more Mac-native
-        // of the two, but the point of this file is that someone can open it
-        // — the same reason the audio mix is m4a and not caf. mp4 plays on
+        // of the two, but the point of this file is that someone can open it,
+        // the same reason the audio mix is m4a and not caf. mp4 plays on
         // Windows, Android, and in a browser without help; .mov outside macOS
         // means "find VLC". It is also SCRecordingOutput's own default.
         //
@@ -289,7 +289,7 @@ final class CaptureStream: NSObject, @unchecked Sendable {
     /// whose audio is captured.
     ///
     /// ScreenCaptureKit scopes audio at the app level and never at the window
-    /// level — "when a single window filter is used, all the audio content
+    /// level: "when a single window filter is used, all the audio content
     /// from the application that contains the window will be captured, even
     /// from those windows that are not present in the video output" (WWDC22,
     /// Take ScreenCaptureKit to the Next Level). So:
@@ -338,7 +338,7 @@ final class CaptureStream: NSObject, @unchecked Sendable {
     /// Whole-display capture with trailmix's own windows left out.
     ///
     /// A window filter only ever contains the one window, but a display filter
-    /// takes everything on screen — including the capture outline drawn around
+    /// takes everything on screen, including the capture outline drawn around
     /// the recorded area, which would be burned into the video it is marking.
     /// Excluding the app by identity also keeps the menu out of the frame.
     private static func filter(
@@ -353,7 +353,7 @@ final class CaptureStream: NSObject, @unchecked Sendable {
             // see, which shouldn't happen while the status item exists. Worth
             // a line: it's the one condition under which the capture outline
             // ends up burned into a display recording.
-            Log.warn("trailmix isn't in the shareable content list — the capture outline may be recorded")
+            Log.warn("trailmix isn't in the shareable content list, so the capture outline may be recorded")
         }
         return SCContentFilter(
             display: display,
@@ -427,7 +427,7 @@ extension CaptureStream: SCRecordingOutputDelegate {
         // that is already known to be broken helps nobody.
         videoFinalized.set()
         Log.warn("screen recording failed: \(error.localizedDescription)")
-        notifyUser(title: "trailmix — video recording failed", body: error.localizedDescription)
+        notifyUser(title: "trailmix: video recording failed", body: error.localizedDescription)
     }
 }
 

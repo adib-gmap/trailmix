@@ -3,7 +3,7 @@ import ArgumentParser
 import CoreAudio
 import Foundation
 
-/// `trailmix mic` — report what the microphone input actually delivers.
+/// `trailmix mic`: report what the microphone input actually delivers.
 ///
 /// This exists because the format the input node *reports* and the format it
 /// *delivers* are not the same thing once voice processing is switched on, and
@@ -12,7 +12,7 @@ import Foundation
 /// of AAC silence looks exactly like a 28-second recording until you play it.
 ///
 /// Must be run from inside the app bundle, like everything else that touches
-/// the microphone — the bare binary has no usage string and macOS kills it:
+/// the microphone. The bare binary has no usage string and macOS kills it:
 ///
 ///     dist/Trailmix.app/Contents/MacOS/trailmix mic
 struct Mic: ParsableCommand {
@@ -45,7 +45,7 @@ struct Mic: ParsableCommand {
                 try input.setVoiceProcessingEnabled(true)
                 print("voice processing: enabled")
             } catch {
-                print("voice processing: FAILED — \(error.localizedDescription)")
+                print("voice processing: FAILED (\(error.localizedDescription))")
             }
             Self.report("  inputFormat ", input.inputFormat(forBus: 0))
             Self.report("  outputFormat", input.outputFormat(forBus: 0))
@@ -71,7 +71,7 @@ struct Mic: ParsableCommand {
 
     /// The probe above taps the node directly, which is not the code that
     /// writes recordings. This runs the actual MicrophoneCapture and
-    /// AudioTrackWriter and then reads back what landed on disk — the only
+    /// AudioTrackWriter and then reads back what landed on disk, the only
     /// check that would have caught nine channels collapsing to silence.
     private func recordThroughRealPath(to url: URL) throws {
         try? FileManager.default.removeItem(at: url)
@@ -85,7 +85,7 @@ struct Mic: ParsableCommand {
         writer.close()
 
         guard let file = try? AVAudioFile(forReading: url) else {
-            print("  FAILED — nothing readable was written")
+            print("  FAILED: nothing readable was written")
             return
         }
         let size = (try? FileManager.default.attributesOfItem(atPath: url.path))?[.size] as? Int ?? 0
@@ -116,7 +116,7 @@ struct Mic: ParsableCommand {
             + "(\(rms > 0 ? String(format: "%.1f dBFS", 20 * log10(rms)) : "silent"))")
         print(peak > 0.0001
             ? "  FILE HAS AUDIO"
-            : "  FILE IS SILENT — this is the bug")
+            : "  FILE IS SILENT: this is the bug")
     }
 
     private static func report(_ label: String, _ format: AVAudioFormat) {
@@ -193,7 +193,7 @@ private final class Probe: @unchecked Sendable {
         defer { lock.unlock() }
         print("tap delivered:")
         guard let format, buffers > 0 else {
-            print("  NOTHING — no buffers arrived")
+            print("  NOTHING: no buffers arrived")
             return
         }
         print("  buffer format: \(Int(format.sampleRate)) Hz, \(format.channelCount)ch")
@@ -205,7 +205,7 @@ private final class Probe: @unchecked Sendable {
             + "rms \(String(format: "%.6f", rms)) (\(String(format: "%.1f", db)) dBFS)")
         print(peak > 0.0001
             ? "  SIGNAL PRESENT"
-            : "  SILENT — the tap is running but every sample is zero")
+            : "  SILENT: the tap is running but every sample is zero")
         guard perChannelPeak.count > 1 else { return }
         print("  per channel (which one actually carries the mic):")
         for (i, p) in perChannelPeak.enumerated() {

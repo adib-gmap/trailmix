@@ -32,7 +32,7 @@ struct ShareableContent: Sendable {
 
     struct WindowOption: Sendable, Identifiable {
         let id: CGWindowID
-        /// "Zoom — Team Standup" style label, app name first.
+        /// "Zoom: Team Standup" style label, app name first.
         let label: String
     }
 
@@ -61,7 +61,7 @@ struct ShareableContent: Sendable {
             guard let title = window.title, !title.isEmpty else { continue }
             guard window.frame.width > 80, window.frame.height > 80 else { continue }
             let app = window.owningApplication?.applicationName ?? "Unknown"
-            windows.append(WindowOption(id: window.windowID, label: "\(app) — \(title)"))
+            windows.append(WindowOption(id: window.windowID, label: "\(app): \(title)"))
         }
         windows.sort { $0.label.localizedStandardCompare($1.label) == .orderedAscending }
 

@@ -4,7 +4,7 @@ import Foundation
 /// Replaces the video's audio track with the mixed one.
 ///
 /// With echo cancellation on, the mic is no longer part of the SCStream, so
-/// SCRecordingOutput muxes system audio and nothing else — a screen recording
+/// SCRecordingOutput muxes system audio and nothing else: a screen recording
 /// of a call where you can't hear yourself. This puts the full mix back, which
 /// also means the video ends up with the echo-cancelled mic rather than the
 /// raw one it used to get. It is what makes `mixed.mp4` deserve the name.
@@ -12,7 +12,7 @@ import Foundation
 /// Passthrough export: the video is copied stream-for-stream, never re-encoded,
 /// so this costs a container rewrite rather than a transcode and nothing is
 /// lost. The original is replaced only after the new file is written and
-/// verified, and `replaceItemAt` makes the swap atomic — an interrupted remux
+/// verified, and `replaceItemAt` makes the swap atomic, so an interrupted remux
 /// leaves the original video exactly as it was.
 enum Remux {
     enum RemuxError: Error, CustomStringConvertible {
@@ -94,7 +94,7 @@ enum Remux {
 
         // Written beside the original and exported to whatever container the
         // original uses, so a pre-rename screen.mov is remuxed as a .mov and
-        // stays where it is rather than quietly becoming a second file.
+        // stays where it is rather than becoming a second file.
         let isMP4 = video.pathExtension.lowercased() == "mp4"
         let temp = video.deletingLastPathComponent()
             .appendingPathComponent("remux.tmp.\(video.pathExtension)")

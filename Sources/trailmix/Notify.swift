@@ -5,7 +5,7 @@ import UserNotifications
 /// Best-effort user-visible notification, posted as trailmix.
 ///
 /// This used to shell out to `osascript`, which works but posts the
-/// notification *as Script Editor* — so trailmix's icon was wrong and clicking
+/// notification *as Script Editor*, so trailmix's icon was wrong and clicking
 /// "transcript ready" opened Script Editor. Now that there is a real signed
 /// bundle with an identifier, `UNUserNotificationCenter` is available and the
 /// notification belongs to the app that sent it. It also drops a `Process`
@@ -22,7 +22,7 @@ enum Notify {
             if let error {
                 Log.warn("notification authorization failed: \(error.localizedDescription)")
             } else if !granted {
-                Log.info("notifications not permitted — check System Settings › Notifications")
+                Log.info("notifications not permitted, check System Settings › Notifications")
             }
         }
         return true
@@ -75,7 +75,7 @@ enum Notify {
         // a bundle. That shouldn't happen (the bare binary can't get a mic
         // either) but an unraisable exception is not worth the risk.
         guard Bundle.main.bundleIdentifier != nil else {
-            Log.warn("no bundle identifier — can't post: \(title): \(body)")
+            Log.warn("no bundle identifier, can't post: \(title): \(body)")
             return
         }
         _ = requested

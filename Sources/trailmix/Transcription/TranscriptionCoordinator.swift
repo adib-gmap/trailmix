@@ -4,7 +4,7 @@ import Foundation
 /// Post-recording pipeline: a serial queue of session folders to transcribe.
 /// mic.caf → "mic", system.caf → "system"; each track's segments are shifted by
 /// its start offset, merged by timestamp, and written as transcript.json
-/// (canonical) plus transcript.md.txt (readable). The filesystem is the queue —
+/// (canonical) plus transcript.md.txt (readable). The filesystem is the queue:
 /// `resumePending()` rescans at launch, so a crash or quit mid-transcription
 /// just retries on next run. Failures append to the session's transcript.log
 /// and never block later jobs.
@@ -27,15 +27,15 @@ actor TranscriptionCoordinator {
 
     /// Queue a finished session. With transcription disabled in config, or a
     /// video-only session with no audio to transcribe, the on_stop hook still
-    /// fires — it just gets an untranscribed folder.
+    /// fires; it just gets an untranscribed folder.
     func enqueue(_ sessionDir: URL) {
         guard Config.current.transcriptionEnabled else {
-            log(sessionDir, "not transcribing — disabled in config")
+            log(sessionDir, "not transcribing: disabled in config")
             runHook(for: sessionDir)
             return
         }
         guard !audioTracks(in: sessionDir).isEmpty else {
-            log(sessionDir, "not transcribing — no audio tracks on disk")
+            log(sessionDir, "not transcribing: no audio tracks on disk")
             runHook(for: sessionDir)
             return
         }
@@ -70,10 +70,10 @@ actor TranscriptionCoordinator {
                 pending.append(dir)
             } else if !sessionFiles(in: dir).isEmpty {
                 // No meta.json means the process died before it could stop
-                // cleanly. The audio is still good — CAF needs no finalization
-                // pass — so recover it rather than orphaning it forever.
-                // (the video will be unplayable in that case; mp4 does need
-                // finalizing. It's still recorded in the metadata.)
+                // cleanly. The audio is still good, since CAF needs no
+                // finalization pass, so recover it rather than orphaning it
+                // forever. (the video will be unplayable in that case; mp4 does
+                // need finalizing. It's still recorded in the metadata.)
                 pending.append(dir)
             }
         }
@@ -84,7 +84,7 @@ actor TranscriptionCoordinator {
             if !fm.fileExists(atPath: dir.appendingPathComponent(SessionFiles.meta).path) {
                 do {
                     try recoverMeta(at: dir)
-                    log(dir, "recovered meta.json — session never stopped cleanly")
+                    log(dir, "recovered meta.json: session never stopped cleanly")
                 } catch {
                     log(dir, "can't recover meta.json: \(error)")
                     continue
@@ -117,7 +117,7 @@ actor TranscriptionCoordinator {
     /// .caf files at all, and judging by audio alone would orphan it forever.
     private func sessionFiles(in dir: URL) -> [String: String] {
         var files = audioTracks(in: dir)
-        // Whichever name the video was written under — a session recorded
+        // Whichever name the video was written under. A session recorded
         // before the rename still has screen.mov, and judging it by the
         // current name alone would orphan it.
         if let video = SessionFiles.video(in: dir) {
@@ -127,7 +127,7 @@ actor TranscriptionCoordinator {
     }
 
     /// Reconstruct a minimal meta.json for a session killed before it wrote
-    /// one — SIGKILL, a panic, a power loss, the cases no signal handler can
+    /// one: SIGKILL, a panic, a power loss, the cases no signal handler can
     /// catch. Timestamps are estimated from the filesystem and marked as such;
     /// per-track offsets are unknowable after the fact and default to 0, which
     /// is what SessionMeta.read already assumes for sessions recorded before
@@ -193,7 +193,7 @@ actor TranscriptionCoordinator {
             do {
                 try await transcribe(dir)
                 notifyUser(
-                    title: "trailmix — transcript ready",
+                    title: "trailmix: transcript ready",
                     body: dir.lastPathComponent,
                     reveal: dir
                 )
@@ -202,8 +202,8 @@ actor TranscriptionCoordinator {
                 log(dir, "transcription failed: \(error)")
                 lastFailure = dir.lastPathComponent
                 notifyUser(
-                    title: "trailmix — transcription failed",
-                    body: "\(dir.lastPathComponent) — see \(SessionFiles.transcriptLog)",
+                    title: "trailmix: transcription failed",
+                    body: "\(dir.lastPathComponent), see \(SessionFiles.transcriptLog)",
                     reveal: dir
                 )
             }
@@ -230,7 +230,7 @@ actor TranscriptionCoordinator {
             }
             log(dir, "transcribing \(track.file) (\(engine.name))")
             // One bad track (empty, truncated) shouldn't cost us the other's
-            // transcript — log it and keep going.
+            // transcript, so log it and keep going.
             let segments: [TranscriptSegment]
             do {
                 segments = try await engine.transcribe(audio)
@@ -257,14 +257,14 @@ actor TranscriptionCoordinator {
             segments: merged
         )
         try transcript.write(to: dir)
-        log(dir, "done — \(merged.count) segments")
+        log(dir, "done: \(merged.count) segments")
     }
 
     private func preparedEngine() async throws -> TranscriptionEngine {
         if let engine { return engine }
         let configured = Config.current.transcriptionEngine
         if configured != "parakeet" {
-            Log.warn("unknown transcription engine \"\(configured)\" — using parakeet")
+            Log.warn("unknown transcription engine \"\(configured)\", using parakeet")
         }
         let engine = ParakeetEngine()
         // The first load of the session compiles ~440 MB of Core ML weights for
@@ -339,7 +339,7 @@ private struct SessionMeta {
             let files = json["files"] as? [String: String]
         else { throw MetaError.unreadable(url) }
 
-        // Sessions recorded before offsets were captured default to 0 —
+        // Sessions recorded before offsets were captured default to 0;
         // tracks start within tens of milliseconds of each other anyway.
         let offsets = json["start_offset_ms"] as? [String: Int] ?? [:]
         // Named for the source, not for who is presumably behind it. "me" and
@@ -357,7 +357,7 @@ private struct SessionMeta {
     }
 }
 
-/// Canonical transcript. Property names are the JSON schema — this struct
+/// Canonical transcript. Property names are the JSON schema: this struct
 /// exists to be serialized.
 private struct Transcript: Codable {
     struct Segment: Codable {
@@ -374,7 +374,7 @@ private struct Transcript: Codable {
 
     /// Write transcript.json and the readable rendering. Both writes are
     /// atomic (temp file + rename), so a partially written transcript never
-    /// exists on disk — resumePending treats presence of transcript.json as
+    /// exists on disk, and resumePending treats presence of transcript.json as
     /// "done".
     ///
     /// The readable one is `transcript.md.txt`, not `transcript.md`. It is
@@ -391,7 +391,7 @@ private struct Transcript: Codable {
     }
 
     private func rendered(title: String) -> String {
-        var lines = ["# \(title)", "", "engine: \(engine) (\(model))", ""]
+        var lines = ["# \(title)", ""]
         for seg in segments {
             lines.append("**[\(Self.clock(seg.start_ms))] \(Self.label(seg.speaker)):** \(seg.text)")
             lines.append("")

@@ -31,7 +31,7 @@ final class MicrophoneCapture: @unchecked Sendable {
         var description: String {
             switch self {
             case .noInputFormat:
-                return "the input device reported no usable format — is a microphone connected?"
+                return "the input device reported no usable format. Is a microphone connected?"
             }
         }
     }
@@ -69,8 +69,8 @@ final class MicrophoneCapture: @unchecked Sendable {
         // being recorded, and the user hears their own video drop in volume
         // the instant they press record.
         //
-        // `.min` rather than off, because there is no off. Advanced ducking —
-        // which ducks dynamically on detected speech — is switched off too, so
+        // `.min` rather than off, because there is no off. Advanced ducking,
+        // which ducks dynamically on detected speech, is switched off too, so
         // at least the level stays put instead of pumping.
         input.voiceProcessingOtherAudioDuckingConfiguration =
             AVAudioVoiceProcessingOtherAudioDuckingConfiguration(
@@ -103,7 +103,7 @@ final class MicrophoneCapture: @unchecked Sendable {
     /// Take channel 0 and discard the rest.
     ///
     /// The voice-processing input node reports **nine channels on a
-    /// one-channel device** — verified with `trailmix mic` on the built-in
+    /// one-channel device**, verified with `trailmix mic` on the built-in
     /// MacBook Pro microphone, which presents 1ch before
     /// `setVoiceProcessingEnabled(true)` and 9ch after. All nine carry the
     /// identical processed mono signal, to the last decimal of peak and RMS.
@@ -117,7 +117,11 @@ final class MicrophoneCapture: @unchecked Sendable {
     /// Taking one channel of a duplicated set loses nothing. It would matter
     /// on a genuinely multi-capsule input, but voice processing collapses
     /// anything it is given to mono before this point.
-    private static func firstChannel(of buffer: AVAudioPCMBuffer) -> AVAudioPCMBuffer? {
+    ///
+    /// Internal rather than private so the tests can reach it. It is the fix
+    /// for a bug whose only symptom was a silent file, and everything around it
+    /// (the engine, the tap, the device) needs a microphone to exercise.
+    static func firstChannel(of buffer: AVAudioPCMBuffer) -> AVAudioPCMBuffer? {
         guard buffer.format.channelCount > 1 else { return buffer }
         guard
             let source = buffer.floatChannelData,
@@ -137,7 +141,7 @@ final class MicrophoneCapture: @unchecked Sendable {
         return mono
     }
 
-    /// Idempotent. Does not close the writer — the session closes every track
+    /// Idempotent. Does not close the writer: the session closes every track
     /// together so they finalize on one path.
     func stop() {
         if tapped {

@@ -30,7 +30,7 @@ enum Mixdown {
     /// Build `mixed.m4a` for a session and record it in meta.json.
     ///
     /// Offsets come from meta.json's `start_offset_ms`, so the tracks line up
-    /// the same way the transcript does — the mic and system streams do not
+    /// the same way the transcript does. The mic and system streams do not
     /// begin on the same buffer and a naive concatenation at zero would drift
     /// them apart by a couple of hundred milliseconds.
     static func run(in dir: URL) async {
@@ -60,21 +60,23 @@ enum Mixdown {
             guard FileManager.default.fileExists(atPath: url.path) else { continue }
 
             let asset = AVURLAsset(url: url)
-            guard
-                let source = try await asset.loadTracks(withMediaType: .audio).first,
-                let target = composition.addMutableTrack(
-                    withMediaType: .audio,
-                    preferredTrackID: kCMPersistentTrackID_Invalid
-                )
+            guard let source = try await asset.loadTracks(withMediaType: .audio).first
             else { continue }
 
+            // Checked before a composition track is added rather than after, so
+            // a failed capture leaves nothing behind in the composition. An
+            // empty track is the signature of one; inserting it would only
+            // widen the file with silence.
             let duration = try await asset.load(.duration)
             guard duration.seconds > 0 else {
-                // An empty track is the signature of a capture that failed;
-                // inserting it would only widen the file with silence.
-                Log.warn("\(dir.lastPathComponent): \(name) is empty — leaving it out of the mix")
+                Log.warn("\(dir.lastPathComponent): \(name) is empty, leaving it out of the mix")
                 continue
             }
+
+            guard let target = composition.addMutableTrack(
+                withMediaType: .audio,
+                preferredTrackID: kCMPersistentTrackID_Invalid
+            ) else { continue }
 
             try target.insertTimeRange(
                 CMTimeRange(start: .zero, duration: duration),
@@ -110,7 +112,7 @@ enum Mixdown {
 
     /// Add the mix to meta.json's `files`, preserving everything else. The mix
     /// is built after the session has already stopped and written its metadata,
-    /// so this is a patch rather than part of the original write — keeping the
+    /// so this is a patch rather than part of the original write. Keeping the
     /// menu's "finishing…" window short is worth the extra read.
     private static func record(_ name: String, in dir: URL) {
         let url = dir.appendingPathComponent(SessionFiles.meta)

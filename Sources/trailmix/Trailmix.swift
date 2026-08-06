@@ -7,7 +7,7 @@ import Foundation
 /// Trailmix is launched two ways and both have to work. A double-click in
 /// /Applications comes through LaunchServices, which may append process-serial
 /// arguments like `-psn_0_12345` that ArgumentParser would reject as unknown
-/// options — the app would exit before ever reaching the menu bar. Running the
+/// options, so the app would exit before ever reaching the menu bar. Running the
 /// executable inside the bundle from Terminal is the developer path and still
 /// wants `doctor` and `run --out`.
 ///
@@ -26,7 +26,7 @@ struct Trailmix: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "trailmix",
         abstract: "Local recorder + transcriber. Captures computer audio, microphone, and a window or display, then transcribes on-device.",
-        subcommands: [Run.self, Doctor.self, Mic.self],
+        subcommands: [Run.self, Doctor.self, Mic.self, TimerCheck.self],
         defaultSubcommand: Run.self
     )
 }
@@ -40,19 +40,37 @@ struct Run: ParsableCommand {
     @Option(name: .long, help: "Recordings root directory (overrides the config file).")
     var out: String?
 
-    func run() {
+    /// Also the only way to exercise the auto-stop path without waiting out
+    /// the shortest limit the menu offers: `--stop-after 90s` runs the whole
+    /// thing in a minute and a half.
+    @Option(name: .long, help: "Pre-set the recording timer (70, 70m, 1:10, 1h10m, 90s).")
+    var stopAfter: String?
+
+    func run() throws {
         // ArgumentParser invokes run() on the main thread; promote that fact
         // to the type system so AppKit calls are cleanly isolated.
-        MainActor.assumeIsolated { runMain() }
+        try MainActor.assumeIsolated { try runMain() }
     }
 
     @MainActor
-    private func runMain() {
+    private func runMain() throws {
         let root = Config.resolveRoot(cliOverride: out)
+
+        // Fail here rather than at the menu bar: a mistyped duration that
+        // silently became "no timer" would only be discovered by a recording
+        // that didn't stop.
+        var limit: RecordingLimit?
+        if let stopAfter {
+            do {
+                limit = try RecordingLimit.parse(stopAfter)
+            } catch let failure as RecordingLimit.ParseFailure {
+                throw ValidationError("--stop-after: \(failure.message)")
+            }
+        }
 
         // Non-blocking: permissions prompt on first recording, so a failing
         // check here is informational, not fatal. Launched from Finder there is
-        // no terminal to print to and no exit code anyone will ever see — the
+        // no terminal to print to and no exit code anyone will ever see: the
         // app would just vanish on double-click with no explanation. Report it
         // and carry on; the failures ride into the menu, which is the only
         // surface the user actually sees.
@@ -67,10 +85,10 @@ struct Run: ParsableCommand {
         let app = NSApplication.shared
         app.setActivationPolicy(.accessory)
 
-        let controller = AppController(root: root, warnings: failures)
+        let controller = AppController(root: root, warnings: failures, limit: limit)
 
         // ^C sends SIGINT; launchd sends SIGTERM on logout, shutdown, and
-        // `launchctl bootout`. Both have to reach the same clean shutdown —
+        // `launchctl bootout`. Both have to reach the same clean shutdown, since
         // an unhandled SIGTERM kills the process before RecordingSession.stop()
         // writes meta.json, which used to strand the recording permanently.
         let signalSources = [SIGINT, SIGTERM].map { signum -> DispatchSourceSignal in
@@ -103,6 +121,10 @@ struct Doctor: ParsableCommand {
     func run() throws {
         let checks = DoctorReport.run(recordingsRoot: Config.resolveRoot(cliOverride: nil))
         DoctorReport.print(checks)
+        // Printed here rather than folded into a check, because it is about how
+        // to read the report rather than about anything being wrong with it.
+        print("")
+        print(permissionAttributionNote)
         if !DoctorReport.allOK(checks) {
             throw ExitCode(1)
         }
@@ -125,9 +147,17 @@ final class AppController {
     private var busy = false
     private var terminating = false
 
+    /// When the current recording stops itself, and whether the "stopping
+    /// soon" warning has already gone out for that deadline. Both are wall
+    /// clock rather than a countdown of ticks, so a machine that slept through
+    /// the deadline stops on the first tick after it wakes instead of resuming
+    /// a recording nobody is watching.
+    private var deadline: Date?
+    private var warned = false
+
     /// `warnings` are failed startup checks, shown in the menu. They don't
-    /// block startup — see `Run.runMain`.
-    init(root: URL, warnings: [String] = []) {
+    /// block startup; see `Run.runMain`.
+    init(root: URL, warnings: [String] = [], limit: RecordingLimit? = nil) {
         self.root = root
         menuBar.onToggle = { [weak self] in self?.toggle() }
         menuBar.onOpenFolder = { [weak self] in self?.openFolder() }
@@ -142,13 +172,30 @@ final class AppController {
                 capture: Self.captureConfig(for: sources.target)
             )
         }
+        menuBar.onLimitChanged = { [weak self] limit in self?.limitChanged(to: limit) }
         menuBar.onDownloadModel = { [weak self] in self?.modelDownload.start() }
-        // The cache can fill in behind the menu's back: a transcription that
-        // ran since the last open downloads the same weights this row offers.
-        menuBar.onMenuOpen = { [weak self] in self?.modelDownload.refresh() }
+        menuBar.onRequestPermission = { [weak self] permission in
+            self?.requestPermission(permission)
+        }
+        menuBar.onOpenPrivacySettings = { Permissions.openSettings(for: nil) }
+        // Both of these can change behind the menu's back: a transcription that
+        // ran since the last open downloads the same weights that row offers,
+        // and a permission can be toggled in System Settings at any time.
+        menuBar.onMenuOpen = { [weak self] in
+            self?.modelDownload.refresh()
+            self?.menuBar.updatePermissions(Permissions.all())
+        }
         modelDownload.onChange = { [weak self] state in self?.showModel(state) }
 
         menuBar.restore(sources: Self.savedSources())
+        menuBar.setLimit(limit)
+        // Before the first `update`, which renders the idle line from these. An
+        // empty status list reads as everything being missing, which is the
+        // right way for it to fail but the wrong thing to flash on screen.
+        // Reading a grant never prompts; asking is what waits for a click.
+        let permissions = Permissions.all()
+        menuBar.updatePermissions(permissions)
+        Log.info(Permissions.logLine(permissions))
         menuBar.update(recording: false, elapsed: nil)
         menuBar.updateWarnings(warnings)
 
@@ -219,7 +266,7 @@ final class AppController {
         // between the two: a second click landing while the first task was
         // suspended at an await passed the guard, saw `session` still nil, and
         // started a *second* capture. The first stream's SCStream was then
-        // overwritten and never stopped — a live recording with nothing left
+        // overwritten and never stopped: a live recording with nothing left
         // holding it, and a menu that no longer matched anything real.
         guard !busy else { return }
         busy = true
@@ -237,28 +284,128 @@ final class AppController {
         let sources = menuBar.sources
         guard !sources.isEmpty else { return }
 
+        // Read the grants again rather than trusting the menu's snapshot: one
+        // can be revoked in System Settings between the menu opening and the
+        // click landing.
+        let statuses = Permissions.all()
+        let missing = Permissions.blockers(for: sources, given: statuses)
+        guard missing.isEmpty else {
+            menuBar.updatePermissions(statuses)
+            Log.warn("not recording · \(Permissions.blockedReason(missing) ?? "")")
+            explainBlockedRecording(missing)
+            return
+        }
+
+        let newSession: RecordingSession
         do {
-            let newSession = try RecordingSession(
+            newSession = try RecordingSession(
                 root: root,
                 sources: sources,
                 capture: Config.current.capture
             )
-            newSession.onUnexpectedStop = { [weak self] reason in
-                self?.handleUnexpectedStop(reason)
-            }
-            try await newSession.start()
-            session = newSession
-            Log.info("● recording → \(newSession.dir.path)")
         } catch {
             Log.warn("recording start failed: \(error)")
-            notifyUser(title: "trailmix — recording failed", body: "\(error)")
+            notifyUser(title: "trailmix: recording failed", body: "\(error)")
+            return
+        }
+        newSession.onUnexpectedStop = { [weak self] reason in
+            self?.handleUnexpectedStop(reason)
+        }
+
+        do {
+            try await newSession.start()
+        } catch {
+            // The folder is created by init, before capture is attempted, so a
+            // failed start would otherwise leave an empty timestamped directory
+            // in the recordings root. Only removed when it really is empty, so
+            // a partial capture is never thrown away to tidy up.
+            let contents = (try? FileManager.default.contentsOfDirectory(
+                atPath: newSession.dir.path
+            )) ?? []
+            if contents.isEmpty {
+                try? FileManager.default.removeItem(at: newSession.dir)
+            }
+            Log.warn("recording start failed: \(error)")
+            notifyUser(title: "trailmix: recording failed", body: "\(error)")
+            return
+        }
+        session = newSession
+        Log.info("● recording → \(newSession.dir.path)")
+
+        overlay.show(for: sources.target)
+        computeDeadline()
+
+        // Installed in .common rather than scheduled into .default. A menu
+        // that is open puts the run loop in event-tracking mode, where a
+        // default-mode timer simply doesn't fire: the elapsed counter froze
+        // for as long as the menu was held open, and now that the auto-stop
+        // check rides on this same tick, so would the stop.
+        let ticker = Timer(timeInterval: 1, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { self?.tick() }
+        }
+        RunLoop.main.add(ticker, forMode: .common)
+        self.ticker = ticker
+        tick()
+    }
+
+    /// Work out when the current recording has to stop: the limit the user
+    /// picked, the backstop, or whichever of the two comes first.
+    ///
+    /// Measured from `startedAt`, because a limit means total recording length.
+    /// Picking "1 hour" is a statement about how long the recording is, not
+    /// about how much longer it has left. Extending is a separate verb, and
+    /// the menu offers it as one.
+    private func computeDeadline() {
+        guard let session else {
+            deadline = nil
+            warned = false
             return
         }
 
-        overlay.show(for: sources.target)
-        menuBar.update(recording: true, elapsed: "0:00")
-        ticker = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
-            MainActor.assumeIsolated { self?.tick() }
+        var candidates: [Date] = []
+        if let limit = menuBar.limit {
+            candidates.append(session.startedAt.addingTimeInterval(limit.seconds))
+        }
+        let backstop = Config.current.maxRecordingHours
+        if backstop > 0 {
+            candidates.append(session.startedAt.addingTimeInterval(backstop * 3600))
+        }
+
+        let next = candidates.min()
+        // A deadline that moved deserves a fresh warning: extending past the
+        // five-minute mark and then getting no second warning is how you end
+        // up surprised twice by the same timer.
+        if next != deadline { warned = false }
+        deadline = next
+    }
+
+    private func limitChanged(to limit: RecordingLimit?) {
+        computeDeadline()
+        Log.info("recording timer → \(limit?.compact ?? "off")")
+        // Show the new countdown now rather than up to a second from now; the
+        // menu the user just clicked in is still on screen.
+        if session != nil { tick() }
+    }
+
+    /// The timer ran out. Same shape as `handleUnexpectedStop` down to the
+    /// synchronous `busy` claim, for the same reason.
+    private func autoStop() {
+        guard let session, !busy else { return }
+        let ran = deadline.map { $0.timeIntervalSince(session.startedAt) } ?? 0
+        let dir = session.dir
+        Log.info("timer reached \(RecordingLimit.clock(ran)), stopping")
+
+        busy = true
+        Task { @MainActor in
+            defer { busy = false }
+            await stopSession()
+            // After the stop, so the notification's reveal opens a folder that
+            // has finished being written to.
+            notifyUser(
+                title: "trailmix: recording stopped",
+                body: "Reached the \(RecordingLimit(seconds: ran).menuTitle) limit.",
+                reveal: dir
+            )
         }
     }
 
@@ -268,7 +415,7 @@ final class AppController {
     private func handleUnexpectedStop(_ reason: String) {
         guard session != nil, !busy else { return }
         Log.warn("capture stopped on its own: \(reason)")
-        notifyUser(title: "trailmix — capture stopped", body: reason)
+        notifyUser(title: "trailmix: capture stopped", body: reason)
         busy = true
         Task { @MainActor in
             defer { busy = false }
@@ -283,20 +430,26 @@ final class AppController {
         // Everything that says "recording" comes down before the await, not
         // after it. Finalizing takes as long as it takes, and a menu still
         // offering "Stop recording" for a session that is already stopping
-        // reads as a hang — which is exactly what it looked like.
+        // reads as a hang, which is what it looked like.
         ticker?.invalidate()
         ticker = nil
+        deadline = nil
+        warned = false
         overlay.hide()
         menuBar.showFinishing()
+        // A limit belongs to one recording. It was picked because this webinar
+        // was an hour, and carrying it into the next recording would cut short
+        // something started for an entirely different reason.
+        menuBar.setLimit(nil)
 
         await session.stop()
-        let elapsed = Self.format(Date().timeIntervalSince(session.startedAt))
+        let elapsed = RecordingLimit.clock(Date().timeIntervalSince(session.startedAt))
         Log.info("○ stopped · \(elapsed) · \(session.dir.path)")
 
         let failed = session.failedTracks
         if !failed.isEmpty {
             notifyUser(
-                title: "trailmix — recording incomplete",
+                title: "trailmix: recording incomplete",
                 body: "write failures on: \(failed.joined(separator: ", "))",
                 reveal: session.dir
             )
@@ -336,10 +489,146 @@ final class AppController {
 
     private func tick() {
         guard let session else { return }
+        let now = Date()
+
+        // Only a limit the user set produces a countdown. The backstop is a
+        // guard against forgetting, not a clock to watch.
+        let remaining = menuBar.limit.map {
+            session.startedAt.addingTimeInterval($0.seconds).timeIntervalSince(now)
+        }
         menuBar.update(
             recording: true,
-            elapsed: Self.format(Date().timeIntervalSince(session.startedAt))
+            elapsed: now.timeIntervalSince(session.startedAt),
+            remaining: remaining
         )
+
+        guard let deadline else { return }
+        if now >= deadline {
+            autoStop()
+            return
+        }
+
+        let left = deadline.timeIntervalSince(now)
+        let whole = deadline.timeIntervalSince(session.startedAt)
+        // Skipped when the limit is no longer than the warning itself, where
+        // the warning would land at the moment the timer was set.
+        guard !warned, left <= RecordingLimit.warningLead, whole > RecordingLimit.warningLead
+        else { return }
+        warned = true
+        let minutes = Int((left / 60).rounded(.up))
+        notifyUser(
+            title: "trailmix: stopping soon",
+            body: "Recording stops in \(minutes) minute\(minutes == 1 ? "" : "s")."
+        )
+    }
+
+    // MARK: - Permissions
+
+    /// Ask for one grant, then land the user somewhere useful whatever happened.
+    ///
+    /// Three outcomes. Granted and it takes effect immediately, which is the
+    /// microphone. Granted but the running process can't see it, which is
+    /// screen recording and needs a relaunch. Or not granted, which means macOS
+    /// declined to ask and only System Settings can move it.
+    private func requestPermission(_ permission: Permission) {
+        Task { @MainActor in
+            let state = await Permissions.request(permission)
+            menuBar.updatePermissions(Permissions.all())
+
+            guard state == .granted else {
+                Permissions.openSettings(for: permission)
+                return
+            }
+            Log.info("\(permission.title) granted")
+            guard !permission.appliesWithoutRelaunch else { return }
+
+            // Mid-recording an alert is the wrong interruption, and relaunching
+            // would end the very thing the permission was wanted for.
+            guard session == nil else {
+                notifyUser(
+                    title: "trailmix: \(permission.title) granted",
+                    body: "It takes effect the next time Trailmix starts."
+                )
+                return
+            }
+            offerRelaunch(after: permission)
+        }
+    }
+
+    /// Pressing record with a permission missing.
+    ///
+    /// The row stays clickable rather than greying out, because this is the
+    /// moment the explanation is wanted and a dead control explains nothing.
+    /// The primary button leads straight into the same request path the
+    /// Permissions submenu uses, so the click that failed becomes the one that
+    /// fixes it.
+    private func explainBlockedRecording(_ missing: [Permission]) {
+        guard let first = missing.first else { return }
+
+        let alert = NSAlert()
+        alert.messageText = missing.count == 1
+            ? "Trailmix needs \(first.title) access"
+            : "Trailmix needs two permissions"
+        alert.informativeText = Permissions.explanation(missing)
+        alert.addButton(withTitle: "Grant \(first.title)")
+        alert.addButton(withTitle: "Cancel")
+        NSApp.activate(ignoringOtherApps: true)
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+
+        // One at a time, in `Permission.allCases` order, which puts the
+        // microphone first. That is deliberate: it resolves inline, where
+        // screen recording ends in a relaunch, and relaunching with the
+        // microphone still outstanding would lose the second half.
+        requestPermission(first)
+    }
+
+    private func offerRelaunch(after permission: Permission) {
+        let alert = NSAlert()
+        alert.messageText = "\(permission.title) granted"
+        alert.informativeText =
+            "macOS applies this only to a newly launched app. "
+            + "Trailmix needs to restart before it can record."
+        alert.addButton(withTitle: "Relaunch")
+        alert.addButton(withTitle: "Later")
+        // An .accessory app never comes forward on its own, so without this the
+        // alert opens behind whatever the user is looking at.
+        NSApp.activate(ignoringOtherApps: true)
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        relaunch()
+    }
+
+    /// Restart, by handing the reopen to a detached shell that waits for this
+    /// process to be gone first.
+    ///
+    /// Launching the new copy before quitting would put two daemons in the menu
+    /// bar at once, both holding a status item and both willing to record. The
+    /// shell polls for our exit instead, so the handover is strictly ordered
+    /// and `shutdown()` still gets to finalize a session on the way out.
+    private func relaunch() {
+        let path = Bundle.main.bundleURL.path
+        // Single-quoted so a path with spaces survives, with embedded quotes
+        // escaped the only way single-quoting allows.
+        let quoted = "'" + path.replacingOccurrences(of: "'", with: "'\\''") + "'"
+        let pid = ProcessInfo.processInfo.processIdentifier
+
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: "/bin/sh")
+        task.arguments = [
+            "-c", "while kill -0 \(pid) 2>/dev/null; do sleep 0.2; done; open \(quoted)",
+        ]
+        do {
+            try task.run()
+        } catch {
+            // Better to stay up than to quit with nothing coming back.
+            Log.warn("couldn't schedule a relaunch: \(error)")
+            notifyUser(
+                title: "trailmix: couldn't relaunch",
+                body: "Quit and reopen Trailmix for the new permission to apply."
+            )
+            return
+        }
+        Log.info("relaunching")
+        shutdown()
     }
 
     private func openFolder() {
@@ -347,7 +636,7 @@ final class AppController {
         NSWorkspace.shared.open(root)
     }
 
-    /// Pick a new recordings root. Existing sessions stay where they are —
+    /// Pick a new recordings root. Existing sessions stay where they are:
     /// this changes where the *next* one lands, and moving several gigabytes
     /// of video around behind someone's back is not a thing a menu item
     /// should do.
@@ -377,7 +666,7 @@ final class AppController {
         } catch {
             Log.warn("can't use \(chosen.path) for recordings: \(error)")
             notifyUser(
-                title: "trailmix — can't use that folder",
+                title: "trailmix: can't use that folder",
                 body: error.localizedDescription
             )
             return
@@ -388,11 +677,4 @@ final class AppController {
         Log.info("recordings folder → \(chosen.path)")
     }
 
-    private static func format(_ interval: TimeInterval) -> String {
-        let total = Int(interval)
-        let h = total / 3600, m = (total % 3600) / 60, s = total % 60
-        return h > 0
-            ? String(format: "%d:%02d:%02d", h, m, s)
-            : String(format: "%d:%02d", m, s)
-    }
 }

@@ -27,7 +27,7 @@ enum LoginItem {
 
     /// Registration is only meaningful for a bundled, launchable app. Running
     /// the executable straight out of .build has no bundle for SMAppService to
-    /// register, and `register()` throws an opaque error — better to grey the
+    /// register, and `register()` throws an opaque error. Better to grey the
     /// menu item out than to fail on click.
     static var isAvailable: Bool {
         Bundle.main.bundlePath.hasSuffix(".app")
@@ -44,11 +44,9 @@ enum LoginItem {
                 try SMAppService.mainApp.unregister()
             }
         } catch {
-            FileHandle.standardError.write(Data(
-                "couldn't \(enabled ? "enable" : "disable") launch at login: \(error)\n".utf8
-            ))
+            Log.warn("couldn't \(enabled ? "enable" : "disable") launch at login: \(error)")
             notifyUser(
-                title: "trailmix — launch at login",
+                title: "trailmix: launch at login",
                 body: "\(error.localizedDescription)"
             )
         }

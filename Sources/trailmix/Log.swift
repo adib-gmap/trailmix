@@ -19,21 +19,20 @@ import os
 ///     tail -f ~/Library/Logs/trailmix.log
 enum Log {
     private static let logger = Logger(
-        subsystem: "io.github.stephenturner.trailmix",
+        subsystem: "us.stephenturner.trailmix",
         category: "daemon"
     )
 
-    static let fileURL = FileManager.default.homeDirectoryForCurrentUser
-        .appendingPathComponent("Library/Logs/trailmix.log")
+    static let fileURL = Paths.log
 
     /// Truncate above this and start over. A daemon that runs for months
-    /// shouldn't quietly grow a log file forever, and nothing here is worth
+    /// shouldn't grow a log file forever, and nothing here is worth
     /// the complexity of real rotation.
     private static let maxBytes = 1 << 20  // 1 MB
 
     /// Serializes appends: writers come from the main actor, the capture
     /// sample queue, and the transcription actor.
-    private static let queue = DispatchQueue(label: "io.github.stephenturner.trailmix.log")
+    private static let queue = DispatchQueue(label: "us.stephenturner.trailmix.log")
 
     private static let timestamp: DateFormatter = {
         let f = DateFormatter()
@@ -48,8 +47,8 @@ enum Log {
         emit(message)
     }
 
-    /// Something went wrong. Not necessarily fatal — most of the daemon
-    /// degrades rather than stops — but worth finding later.
+    /// Something went wrong. Not necessarily fatal, since most of the daemon
+    /// degrades rather than stops, but worth finding later.
     static func warn(_ message: String) {
         logger.error("\(message, privacy: .public)")
         emit("warning: \(message)")

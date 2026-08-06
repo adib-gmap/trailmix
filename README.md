@@ -1,6 +1,6 @@
 # trailmix
 
-A minimal, fully local macOS recorder + transcriber. Pick your sources from the menu bar — computer audio, microphone, and optionally a window or a whole display — then record. Audio tracks stay separate so trailmix can transcribe them on-device into a source-tagged transcript. Nothing ever leaves the machine.
+A minimal, fully local macOS recorder + transcriber. Pick your sources from the menu bar (computer audio, microphone, and optionally a window or a whole display), then record. Audio tracks stay separate so trailmix can transcribe them on-device into a source-tagged transcript. Nothing ever leaves the machine.
 
 Named for what you eat on a long walk, and a nod to [Granola](https://www.granola.ai/), whose job it does without sending your meetings anywhere. One Swift executable, a menu-bar tray, no window.
 
@@ -13,7 +13,7 @@ There are no downloads and no `.dmg`. You compile it, which takes one command an
 If you already have Xcode's command line tools, the whole thing is:
 
 ```sh
-git clone <your-repo-url> trailmix
+git clone https://github.com/stephenturner/trailmix.git trailmix
 cd trailmix
 make install
 open ~/Applications/Trailmix.app
@@ -40,7 +40,7 @@ A dialog appears; click **Install** and wait. It's a few GB and can take a while
 ### 2. Get the code
 
 ```sh
-git clone <your-repo-url> trailmix
+git clone https://github.com/stephenturner/trailmix.git trailmix
 cd trailmix
 ```
 
@@ -86,6 +86,10 @@ Double-click **Trailmix** in `~/Applications`, or run `open ~/Applications/Trail
 
 Gatekeeper won't block it. Software you compiled yourself isn't quarantined the way a download is, so there's no "unidentified developer" wall to get past.
 
+Trailmix will not start a recording until it has the permissions that recording needs, so a missing grant shows up as a menu that says so rather than as a file that turns out to be empty. The status line reads *Needs Microphone* or *Needs Screen Recording*, and pressing record explains what is missing and offers to ask for it.
+
+Which permissions are needed depends on what you have selected. Screen Recording is always required, even for audio only, because macOS routes all capture through ScreenCaptureKit. The microphone is required only when the *Microphone* source is switched on, so turning that off is a legitimate way to record without granting it.
+
 The first time you record, macOS asks for permission:
 
 - **Screen Recording** is required for *every* recording, even audio-only. Approve it, then **quit and relaunch trailmix**. macOS does not apply this permission to an already-running process.
@@ -93,11 +97,9 @@ The first time you record, macOS asks for permission:
 
 Both are attributed to Trailmix itself and show up under that name in System Settings › Privacy & Security.
 
-To see what's actually granted at any point:
+To see what Trailmix itself is granted, open the menu bar icon and look at **Permissions**. It names anything missing in the row itself, and clicking a missing permission asks for it.
 
-```sh
-make doctor
-```
+Use the menu rather than the terminal for this. `make doctor` reports the same two permissions, but macOS attributes a permission query to whichever process asked, and a command run from a terminal is attributed to the terminal. It will cheerfully tell you the microphone is granted when that is your terminal's grant and not Trailmix's. `doctor` is still the right tool for the recordings folder and the model cache.
 
 ### 6. Start at login (optional)
 
@@ -132,10 +134,18 @@ make install
 
 1. **Launch Trailmix** from `~/Applications`, or let it start at login.
 2. **Click the mountain icon → pick your sources.** *Computer audio* and *Microphone* toggle independently. *Video Capture* selects a display, a window, or None for audio only; the window list is built when you open the submenu. *Change recordings folder…* moves where new sessions land.
-3. **Start recording.** First use prompts for Screen Recording and, if the mic is on, Microphone. The menu-bar mountain inverts — the ridge knocked out of a filled red slab — and the menu shows a running elapsed counter. macOS shows its own purple recording indicator too. When you're capturing a window or a display, a red outline marks exactly what's in frame — it's click-through and follows the window around.
+3. **Start recording.** First use prompts for Screen Recording and, if the mic is on, Microphone. The menu-bar mountain inverts to the ridge knocked out of a filled red slab, and the menu shows a running elapsed counter. macOS shows its own purple recording indicator too. When you're capturing a window or a display, a red outline marks exactly what's in frame. It's click-through and follows the window around.
 4. **Stop recording.** The menu shows *Finishing…* while the files are closed, then returns to *Idle*. Transcription starts automatically when there's audio (the menu shows progress); a notification fires when the transcript is ready, and clicking it opens the session folder. The first transcription after launch loads ~440 MB of model and can take a minute before anything appears.
 
 Sources can't be changed mid-recording. ScreenCaptureKit tears down the recording if the stream configuration changes, so the menu locks those controls while capture is live.
+
+### Stopping on a timer
+
+*Stop after* sets how long a recording may run, for the case where you start one on a webinar and go do something else. Pick a preset or *Custom…* for anything else, which takes `70`, `70m`, `1:10`, or `1h10m`, and a bare number means minutes. The menu bar then shows the time remaining next to the mountain, and a notification warns you five minutes before the end.
+
+The number is the recording's **total** length, not time added on. Setting *1 hour* fifty-five minutes in leaves five minutes, so when a meeting runs over, use *Add 15 minutes* or *Add 1 hour* instead. Those appear at the top of the submenu while recording and are the only things that push the end back. Limits shorter than what's already recorded are greyed out.
+
+A limit applies to one recording and resets when it stops. Even with it off, recordings stop after 8 hours so a forgotten one can't fill the disk overnight; `max_recording_hours` changes that number, and `0` removes the cap.
 
 Each session lands in `~/Trailmix/<yyyy.MM.dd-HHmm>/`:
 
@@ -146,19 +156,19 @@ Each session lands in `~/Trailmix/<yyyy.MM.dd-HHmm>/`:
 | `mixed.m4a` | both audio sources in one file, playable anywhere |
 | `mixed.mp4` | the captured window or display, with that same mixed audio (HEVC) |
 | `transcript.md.txt` | the transcript, rendered for reading |
-| `transcript.json` | the same transcript as data — engine provenance, timings, `mic` / `system` tags |
+| `transcript.json` | the same transcript as data: engine provenance, timings, `mic` / `system` tags |
 | `transcript.log` | what happened during transcription, including anything that went wrong |
 | `meta.json` | start/end timestamps, duration, per-track start offsets, which sources were on |
 
 Only the files for enabled sources are written.
 
-The two `.caf` files are the raw capture, one per source, and they are what gets transcribed — two separate tracks are what make `Mic` vs `System` work without a speaker-identification model. Note the transcript labels the *source*, not the person: your mic can pick up the other side of a call, so a `Mic` line is not a guarantee that you said it.
+The two `.caf` files are the raw capture, one per source, and they are what gets transcribed. Two separate tracks are what make `Mic` vs `System` work without a speaker-identification model. Note the transcript labels the *source*, not the person: your mic can pick up the other side of a call, so a `Mic` line is not a guarantee that you said it.
 
 The two `mixed.*` files are the ones to send someone. Both contain every audio source the session captured; one of them has pictures. They're built after the recording stops, so they appear a moment after the rest.
 
 CAF and MP4 behave differently if trailmix dies mid-recording. CAF needs no finalization pass, so everything already written to `mic.caf` and `system.caf` stays readable through a `kill -9`, a panic, or a power loss. `mixed.mp4` does need one, and without it the video won't open. Quitting normally, or any signal trailmix can catch, finalizes it correctly.
 
-mp4 rather than mov because the point of that file is that someone can open it. That's only half a promise, though — HEVC inside mp4 still needs a codec Windows doesn't always ship, so set `"codec": "h264"` if playing anywhere matters more than halving the file size.
+mp4 rather than mov because the point of that file is that someone can open it. That's only half a promise, though: HEVC inside mp4 still needs a codec Windows doesn't always ship, so set `"codec": "h264"` if playing anywhere matters more than halving the file size.
 
 ### What "computer audio" actually captures
 
@@ -172,27 +182,27 @@ ScreenCaptureKit scopes audio at the **application** level, never at the window 
 
 The first two take the whole system mix. Audio-only still attaches to a display behind the scenes, because ScreenCaptureKit demands a content filter even when you want no video, and that filter takes everything.
 
-The window case is the one to watch. Capture a Firefox window and you get audio from every Firefox tab and window, including ones not on screen — but nothing from Zoom, Slack, or Music. Usually that's what you want: record the Zoom window, get Zoom's audio. But capture the wrong window during a call and `system.caf` is silent, with nothing anywhere to tell you why. If in doubt, use *None* or a display.
+The window case is the one to watch. Capture a Firefox window and you get audio from every Firefox tab and window, including ones not on screen, but nothing from Zoom, Slack, or Music. Usually that's what you want: record the Zoom window, get Zoom's audio. But capture the wrong window during a call and `system.caf` is silent, with nothing anywhere to tell you why. If in doubt, use *None* or a display.
 
 trailmix's own sounds are never recorded, whichever mode you're in.
 
-The red capture outline is excluded from the recording the same way. That's reliable for a window (the capture contains only that window) but relies on macOS listing trailmix as a shareable application when capturing a whole display, which it doesn't always do. If you spot the outline burned into a display recording, that's why — `~/Library/Logs/trailmix.log` says so explicitly when it happens.
+The red capture outline is excluded from the recording the same way. That's reliable for a window (the capture contains only that window) but relies on macOS listing trailmix as a shareable application when capturing a whole display, which it doesn't always do. If you spot the outline burned into a display recording, that's why, and `~/Library/Logs/trailmix.log` says so explicitly when it happens.
 
 ### Echo
 
-Play something through your speakers while the mic is on and, physically, the mic hears it. Left alone that means the far side of a call is recorded twice — once in `system.caf`, once bleeding into `mic.caf` a beat later — and the transcript says everything twice.
+Play something through your speakers while the mic is on and, physically, the mic hears it. Left alone that means the far side of a call is recorded twice, once in `system.caf` and once bleeding into `mic.caf` a beat later, and the transcript says everything twice.
 
 trailmix takes the microphone off ScreenCaptureKit and runs it through the macOS voice-processing unit instead, which subtracts the system output from the mic signal. That is the only route to echo cancellation on macOS; ScreenCaptureKit hands over the raw input and offers nothing to ask for.
 
-Voice processing is a bundle, though. Echo cancellation arrives with automatic gain control and noise suppression, so the mic sounds processed compared with a raw capture — usually an improvement for speech, occasionally not for anything else. `"echo_cancellation": false` puts the mic back on ScreenCaptureKit, raw. Headphones sidestep the whole question either way.
+Voice processing is a bundle, though. Echo cancellation arrives with automatic gain control and noise suppression, so the mic sounds processed compared with a raw capture, usually an improvement for speech and occasionally not for anything else. `"echo_cancellation": false` puts the mic back on ScreenCaptureKit, raw. Headphones sidestep the whole question either way.
 
 ## Transcription
 
-Built in, on-device, automatic. The default engine is **Parakeet TDT 0.6B v2** (English) via [FluidAudio](https://github.com/FluidInference/FluidAudio)'s Core ML port — roughly 20 seconds per hour of audio on Apple Silicon. Models (~440 MB) download once into `~/Library/Application Support/FluidAudio/Models/`, outside the app bundle, so they survive reinstalls and only ever download once per machine.
+Built in, on-device, automatic. The default engine is **Parakeet TDT 0.6B v2** (English) via [FluidAudio](https://github.com/FluidInference/FluidAudio)'s Core ML port, at roughly 20 seconds per hour of audio on Apple Silicon. Models (~440 MB) download once into `~/Library/Application Support/FluidAudio/Models/`, outside the app bundle, so they survive reinstalls and only ever download once per machine.
 
 The download happens on first transcription unless you ask for it sooner. When the weights aren't cached, the menu grows a **Download transcription model** row that fetches them on demand and disappears once they land; `make doctor` reports the same thing from the terminal. Either way you are never downloading 440 MB immediately after an important meeting.
 
-Each track is transcribed separately, shifted by its start offset so both share one clock, and merged by timestamp. Jobs run in a serial queue — you can start a new recording while the last one transcribes. Unfinished jobs resume on next launch (the filesystem is the queue: a session with `meta.json` but no `transcript.json` is pending). Failures append to the session's `transcript.log` and never block later jobs.
+Each track is transcribed separately, shifted by its start offset so both share one clock, and merged by timestamp. Jobs run in a serial queue, so you can start a new recording while the last one transcribes. Unfinished jobs resume on next launch (the filesystem is the queue: a session with `meta.json` but no `transcript.json` is pending). Failures append to the session's `transcript.log` and never block later jobs.
 
 The engine sits behind a small protocol; a Whisper engine (WhisperKit large-v3-turbo) is planned as the fallback / re-transcription option.
 
@@ -207,20 +217,22 @@ Optional, at `~/.config/trailmix/config.json`:
   "capture": { "mode": "none", "display_id": null, "fps": 30, "codec": "hevc" },
   "transcription": { "enabled": true, "engine": "parakeet" },
   "echo_cancellation": true,
+  "max_recording_hours": 8,
   "on_stop": "my-hook"
 }
 ```
 
 Parsed once at startup. Menu selections are written back here, preserving any keys you've hand-edited.
 
-- `recordings_dir` — where sessions land. Resolution order: `--out` flag > config > `~/Trailmix`. *Change recordings folder…* in the menu writes this for you; existing recordings stay where they are.
-- `sources` — which audio to record. Both default on. The menu writes these.
-- `capture.mode` — `none` or `display`. A window selection is deliberately never persisted: `CGWindowID` isn't stable across launches, so a saved window target would silently point at something else. Windows reset to `none` on start.
-- `capture.display_id` — `CGDirectDisplayID` to capture. A saved ID that's no longer attached falls back to audio only.
-- `capture.fps` / `capture.codec` — `30` and `"hevc"` by default. `"h264"` is the other codec, and the one to pick if the video needs to play on machines that may not have HEVC. trailmix checks what the system actually offers and falls back if the preferred one is unavailable.
-- `echo_cancellation` — on by default. Routes the microphone through the macOS voice-processing unit so audio coming out of your speakers doesn't also land in the mic track. Set `false` to record the mic raw, straight off ScreenCaptureKit, exactly as it arrives.
-- `transcription.enabled` — set `false` to just record.
-- `on_stop` — shell command spawned with the session directory as its argument, **after the transcript is written** (or right after recording if transcription is disabled, or if there was no audio to transcribe). Wire it to whatever comes next: summarization, filing, indexing.
+- `recordings_dir`: where sessions land. Resolution order: `--out` flag > config > `~/Trailmix`. *Change recordings folder…* in the menu writes this for you; existing recordings stay where they are.
+- `sources`: which audio to record. Both default on. The menu writes these.
+- `capture.mode`: `none` or `display`. A window selection is deliberately never persisted: `CGWindowID` isn't stable across launches, so a saved window target would silently point at something else. Windows reset to `none` on start.
+- `capture.display_id`: `CGDirectDisplayID` to capture. A saved ID that's no longer attached falls back to audio only.
+- `capture.fps` / `capture.codec`: `30` and `"hevc"` by default. `"h264"` is the other codec, and the one to pick if the video needs to play on machines that may not have HEVC. trailmix checks what the system actually offers and falls back if the preferred one is unavailable.
+- `echo_cancellation`: on by default. Routes the microphone through the macOS voice-processing unit so audio coming out of your speakers doesn't also land in the mic track. Set `false` to record the mic raw, straight off ScreenCaptureKit, exactly as it arrives.
+- `max_recording_hours`: the cap that applies when *Stop after* is off, so a recording started and forgotten can't run overnight. `8` by default; `0` removes it. Deliberately not writable from the menu: a backstop you can move by accident isn't one.
+- `transcription.enabled`: set `false` to just record.
+- `on_stop`: shell command spawned with the session directory as its argument, **after the transcript is written** (or right after recording if transcription is disabled, or if there was no audio to transcribe). Wire it to whatever comes next: summarization, filing, indexing.
 
 ## Development
 
@@ -230,6 +242,8 @@ make install         # ...and copy it to ~/Applications, quitting any running co
 make uninstall       # remove the installed copy
 make doctor          # permissions, recordings folder, models
 make run OUT=<dir>   # foreground daemon against a scratch recordings root
+make test            # run the test suite
+make release         # zip the bundle for a GitHub release, with its sha256
 make icon            # regenerate AppIcon.icns from the ridge mark
 make clean
 ```
@@ -240,45 +254,70 @@ The executable inside the bundle takes subcommands, which is what `make run` and
 ~/Applications/Trailmix.app/Contents/MacOS/trailmix doctor
 ~/Applications/Trailmix.app/Contents/MacOS/trailmix run --out /tmp/scratch
 ~/Applications/Trailmix.app/Contents/MacOS/trailmix mic
+~/Applications/Trailmix.app/Contents/MacOS/trailmix timer 1h10m
 ```
+
+`run` also takes `--stop-after` (`70`, `70m`, `1:10`, `1h10m`, `90s`), which arms the recording timer before the first click.
 
 Always run the copy *inside a bundle*, never `.build/release/trailmix`. The bare executable carries no `Info.plist`, so it has no microphone usage string, and macOS kills the process the moment it asks for the mic.
 
 Signing uses a keychain identity named `Trailmix` when one exists and falls back to ad-hoc otherwise, warning you either way. The name is matched as a substring, so keep only one such identity in the keychain or `codesign` will call it ambiguous and refuse. Override it with `make app SIGN_ID="Developer ID Application: ..."`.
 
+The build writes its own designated requirement rather than letting `codesign` generate one, so it names all three certificates this app could ever be signed with: the self-signed one, any Developer ID certificate, or the Mac App Store leaf, all for this bundle identifier. macOS stores that requirement in its permission records, and the default one pins a single certificate: changing certificates would otherwise leave every existing install with a Screen Recording permission that can never be satisfied again and cannot re-prompt. A permission record keeps whatever requirement it was created with, so this only works written in advance. The Makefile explains it at `DESIGNATED_REQ`.
+
+Builds also carry the **hardened runtime** (`--options runtime` with `App/Trailmix.entitlements`, which grants the microphone and nothing else). Notarization requires it, and it is the part of notarization that can actually stop the app working, so it is on for every build rather than switched on for a release nobody has tested.
+
+`make release` packages the signed bundle with `ditto` and prints its `sha256`. It refuses to package an ad-hoc signed build, since permissions are keyed to the signature and an ad-hoc release would re-prompt on every update.
+
 The app icon is generated, not checked in. `Scripts/make-icon.swift` renders the `.iconset` from the same ridge coordinates `MenuBarController` draws in the menu bar, at every size natively rather than downscaling one master, so the two marks can't drift apart.
+
+### Tests
+
+`make test` runs the suite: no model, no network, no recording, a few milliseconds. It covers the parts where a wrong answer would be silent rather than loud. The duration parser behind *Stop after*, the session filenames an `on_stop` hook depends on, and the audio writer, which is fed synthetic sample buffers in the shape ScreenCaptureKit delivers and checked by decoding the file back: the worst bugs this project has had all produced a recording of the right length containing nothing at all. Starting and stopping a real capture still needs a click, a screen, and a microphone, and has no tests.
 
 ### Diagnostics
 
-Launched from Finder or at login there is no terminal attached, so everything the daemon would print goes to **`~/Library/Logs/trailmix.log`** as well. That file is the first place to look when a recording comes out wrong — it records what each capture started with, what it wrote, and every warning along the way. `tail -f` it while you record. (It's mirrored to the unified log too, under subsystem `io.github.stephenturner.trailmix`, but `log stream` needs an admin account.)
+Launched from Finder or at login there is no terminal attached, so everything the daemon would print goes to **`~/Library/Logs/trailmix.log`** as well. That file is the first place to look when a recording comes out wrong. It records what each capture started with, what it wrote, and every warning along the way. `tail -f` it while you record. (It's mirrored to the unified log too, under subsystem `us.stephenturner.trailmix`, but `log stream` needs an admin account.)
 
 **`trailmix mic`** reports what the microphone is really doing, which is worth more than it sounds: the failure mode for audio capture is a file of the right length full of silence, not a crash.
 
 ```sh
 trailmix mic                      # device, formats, per-channel levels
+trailmix mic --seconds 5          # listen for longer than the default 2
 trailmix mic --raw                # skip voice processing, for comparison
 trailmix mic --write /tmp/t.caf   # record through the real writer and decode it back
 ```
 
 It prints the default input device, the format before and after voice processing, the format the tap *actually* delivers, and peak/RMS per channel. If the peak is near zero while you're talking, the capture path is broken regardless of what the file size suggests.
 
+**`trailmix timer <duration>`** shows how a *Stop after* duration is read, without needing the menu or a bundle:
+
+```sh
+trailmix timer 1:10   # 1:10 → 4200.0 s · 1 hour 10 minutes · 1:10
+trailmix timer 9h     # rejected: 8 hours is the longest a recording can be set to run.
+```
+
 ## Stack
 
-- **Swift** — single SPM executable target, no dependencies beyond FluidAudio and swift-argument-parser
-- **ScreenCaptureKit** — screen capture and system audio. An `SCRecordingOutput` writes the video while an `.audio` stream output writes `system.caf` separately, from the same capture.
-- **AVAudioEngine** — the microphone, on its own, so macOS voice processing can cancel the echo. ScreenCaptureKit has no equivalent.
-- **AVAudioFile** — streaming AAC encode into CAF
-- **AVFoundation** — the post-recording mix and remux, both passthrough where possible so nothing is re-encoded
-- **FluidAudio / Parakeet** — on-device Core ML transcription
-- **NSStatusItem** — the whole UI
+- **Swift**: single SPM executable target, no dependencies beyond FluidAudio and swift-argument-parser
+- **ScreenCaptureKit**: screen capture and system audio. An `SCRecordingOutput` writes the video while an `.audio` stream output writes `system.caf` separately, from the same capture.
+- **AVAudioEngine**: the microphone, on its own, so macOS voice processing can cancel the echo. ScreenCaptureKit has no equivalent.
+- **AVAudioFile**: streaming AAC encode into CAF
+- **AVFoundation**: the post-recording mix and remux, both passthrough where possible so nothing is re-encoded
+- **FluidAudio / Parakeet**: on-device Core ML transcription
+- **NSStatusItem**: the whole UI
 
 ## Gotchas
 
-- Computer audio is captured per *application*, and which applications depends on the *Video Capture* setting — see [What "computer audio" actually captures](#what-computer-audio-actually-captures). With None or a display selected it really is everything the Mac plays, notification dings and music included.
-- **Screen Recording permission is required for every recording**, even audio only. `SCStream` always needs a content filter, so audio-only capture still attaches to a display. `make doctor` reports the real grant state without prompting.
+- Computer audio is captured per *application*, and which applications depends on the *Video Capture* setting; see [What "computer audio" actually captures](#what-computer-audio-actually-captures). With None or a display selected it really is everything the Mac plays, notification dings and music included.
+- **Screen Recording permission is required for every recording**, even audio only. `SCStream` always needs a content filter, so audio-only capture still attaches to a display. The menu bar's *Permissions* submenu reports the real grant state without prompting; `make doctor` reports your terminal's, for the reason in [First launch and permissions](#5-first-launch-and-permissions).
 - Echo cancellation brings automatic gain control and noise suppression with it, and ducks other audio slightly while recording. Both are macOS behaviours that cannot be separated from it. `"echo_cancellation": false` or headphones if that matters.
 - `mixed.m4a` and the audio inside `mixed.mp4` are built *after* the recording stops, so they appear a moment later than the other files. A crash in that window leaves the raw tracks intact but no mixed versions, and nothing regenerates them.
 - Parakeet v2 is English-only. Other languages will come with the Whisper engine.
 - Permissions are keyed to the code signature. Ad-hoc signing keys them to the binary's hash, so every rebuild looks like a different app to macOS and re-prompts. A stable certificate (build step 3) fixes that.
 - The app is `LSUIElement`, so it has no Dock icon and doesn't appear in ⌘-Tab. The menu bar is the only place it exists while running.
 - arm64 only. The bundle isn't a universal binary, since Parakeet wants the Neural Engine anyway.
+
+## License
+
+[MIT](LICENSE).

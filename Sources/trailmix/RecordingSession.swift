@@ -108,11 +108,14 @@ final class RecordingSession {
             meta["stopped_unexpectedly"] = reason
         }
 
+        // Atomic, like every other write to this file. Its mere presence is
+        // what tells `resumePending` the session stopped cleanly, so a
+        // half-written one would mark a session done and then fail to parse.
         if let data = try? JSONSerialization.data(
             withJSONObject: meta,
             options: [.prettyPrinted, .sortedKeys]
         ) {
-            try? data.write(to: dir.appendingPathComponent(SessionFiles.meta))
+            try? data.write(to: dir.appendingPathComponent(SessionFiles.meta), options: .atomic)
         }
     }
 

@@ -10,5 +10,6 @@ dist/
 # Working notes, deliberately untracked
 STATUS.md
 CLAUDE.md
+PLAN.md
 
 .DS_Store

@@ -8,10 +8,11 @@ import Foundation
 ///       "capture": { "mode": "none", "display_id": null, "fps": 30, "codec": "hevc" },
 ///       "transcription": { "enabled": true, "engine": "parakeet" },
 ///       "echo_cancellation": true,
+///       "max_recording_hours": 8,
 ///       "on_stop": "my-hook"
 ///     }
 ///
-/// Parsed once at startup, not per accessor — the source selections are read
+/// Parsed once at startup, not per accessor. The source selections are read
 /// on every menu open and every recording, and a config that changed halfway
 /// through a session used to mean a recording made under one setting and
 /// hooked under another.
@@ -58,16 +59,18 @@ struct Config: Sendable {
     /// playing through the speakers doesn't land in the mic track too. Off
     /// puts the mic back on ScreenCaptureKit, raw and un-gained.
     var echoCancellation: Bool
+    /// Hard cap on any recording, applied even when no timer was set from the
+    /// menu, so a recording started before a meeting and forgotten can't fill
+    /// the disk overnight. Zero or negative disables it. Read-only: the menu
+    /// never writes this, since a backstop you can move from the menu is one
+    /// you can move by accident.
+    var maxRecordingHours: Double
     var onStop: String?
 
-    static let path = FileManager.default.homeDirectoryForCurrentUser
-        .appendingPathComponent(".config/trailmix/config.json")
+    static let path = Paths.config
 
-    /// Where recordings go when nothing overrides it. `~/Recordings` was too
-    /// generic a name to put in someone's home folder — it reads like a system
-    /// folder and says nothing about what put it there.
-    static let defaultRoot = FileManager.default.homeDirectoryForCurrentUser
-        .appendingPathComponent("Trailmix", isDirectory: true)
+    /// Where recordings go when nothing overrides it. See `Paths`.
+    static let defaultRoot = Paths.defaultRecordingsRoot
 
     static let `default` = Config(
         recordingsDir: nil,
@@ -76,11 +79,12 @@ struct Config: Sendable {
         transcriptionEnabled: true,
         transcriptionEngine: "parakeet",
         echoCancellation: true,
+        maxRecordingHours: 8,
         onStop: nil
     )
 
     /// The process-wide config, parsed on first access. A malformed file is
-    /// reported on stderr rather than silently ignored — recordings landing in
+    /// reported rather than silently ignored, since recordings landing in
     /// an unexpected place is worse than a warning.
     static let current: Config = load()
 
@@ -90,9 +94,10 @@ struct Config: Sendable {
             let data = try? Data(contentsOf: path),
             let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
         else {
-            FileHandle.standardError.write(Data(
-                "warning: \(path.path) is not valid JSON — ignoring config\n".utf8
-            ))
+            // Through Log, not straight to stderr: launched from Finder or at
+            // login there is no terminal, and a config silently ignored is how
+            // recordings end up somewhere nobody expects.
+            Log.warn("\(path.path) is not valid JSON, ignoring config")
             return .default
         }
 
@@ -126,6 +131,9 @@ struct Config: Sendable {
         }
         if let echo = json["echo_cancellation"] as? Bool {
             config.echoCancellation = echo
+        }
+        if let hours = (json["max_recording_hours"] as? NSNumber)?.doubleValue {
+            config.maxRecordingHours = hours
         }
         if let cmd = json["on_stop"] as? String, !cmd.isEmpty {
             config.onStop = cmd

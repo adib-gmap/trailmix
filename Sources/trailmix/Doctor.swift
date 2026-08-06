@@ -2,6 +2,26 @@ import AVFoundation
 import CoreGraphics
 import Foundation
 
+/// Why the permission rows below carry a caveat.
+///
+/// macOS attributes a TCC query to the *responsible* process, and for anything
+/// spawned from a shell that is the terminal, not the binary. Measured on
+/// 2026-08-06 with the same build, minutes apart, and it was wrong in both
+/// directions at once:
+///
+///     doctor, from a terminal:  microphone granted, screen recording not
+///     the app, opened by Finder: microphone not granted, screen recording yes
+///
+/// The terminal had a microphone grant and Trailmix did not; Trailmix had a
+/// screen recording grant and the terminal did not. Neither row described the
+/// app. `make doctor` is still the right tool for the recordings folder and the
+/// model cache, which are plain filesystem questions.
+let permissionAttributionNote = """
+note: the two permission rows describe whichever process asked. Run from a \
+terminal that is the terminal, not Trailmix. For Trailmix's own grants use \
+the menu bar → Permissions.
+"""
+
 enum CheckStatus {
     case ok
     case warn(String)
@@ -24,25 +44,28 @@ enum DoctorReport {
         ]
     }
 
+    /// Shares `Permissions.status` with the menu so the two can't disagree
+    /// about what is granted. They can still disagree about *whose* grant they
+    /// are reading: run from a terminal, this reports whatever the terminal is
+    /// entitled to, because macOS attributes a TCC query to the responsible
+    /// process. The menu's Permissions submenu is the one that runs inside the
+    /// app LaunchServices started.
     static func checkMicrophone() -> Check {
-        let status = AVCaptureDevice.authorizationStatus(for: .audio)
-        switch status {
-        case .authorized:
+        switch Permissions.status(of: .microphone) {
+        case .granted:
             return Check(name: "microphone", status: .ok, remediation: nil)
-        case .notDetermined:
+        case .notGranted:
             return Check(
                 name: "microphone",
-                status: .warn("not yet requested — will prompt on first recording"),
-                remediation: "start a recording once; macOS will prompt"
+                status: .warn("not yet requested, will prompt on first recording"),
+                remediation: "menu bar → Permissions → Microphone, or start a recording"
             )
-        case .denied, .restricted:
+        case .denied:
             return Check(
                 name: "microphone",
                 status: .fail("denied"),
                 remediation: "System Settings → Privacy & Security → Microphone → enable for Trailmix"
             )
-        @unknown default:
-            return Check(name: "microphone", status: .fail("unknown state"), remediation: nil)
         }
     }
 
@@ -56,13 +79,13 @@ enum DoctorReport {
     /// (This also used to keep the old LaunchAgent out of a respawn loop; the
     /// agent is gone, but the reasoning stands on its own.)
     static func checkScreenRecording() -> Check {
-        if CGPreflightScreenCaptureAccess() {
+        if Permissions.status(of: .screenRecording) == .granted {
             return Check(name: "screen recording", status: .ok, remediation: nil)
         }
         return Check(
             name: "screen recording",
-            status: .warn("not granted — will prompt on first recording"),
-            remediation: "System Settings → Privacy & Security → Screen & System Audio Recording → enable for Trailmix"
+            status: .warn("not granted, will prompt on first recording"),
+            remediation: "menu bar → Permissions → Screen Recording, then relaunch Trailmix"
         )
     }
 
@@ -128,7 +151,7 @@ enum DoctorReport {
 
     /// Print to stdout. For the `doctor` subcommand, where the report is the
     /// command's output. The long-running daemon uses `rendered` and writes to
-    /// stderr instead — stdout is block-buffered when redirected to a file, so
+    /// stderr instead. stdout is block-buffered when redirected to a file, so
     /// a daemon that never exits never flushes it.
     static func print(_ checks: [Check]) {
         for line in rendered(checks) {
@@ -137,7 +160,7 @@ enum DoctorReport {
     }
 
     /// Hard-failing checks as short "name: reason" lines, for display somewhere
-    /// with no room for remediation text. Warnings are deliberately excluded —
+    /// with no room for remediation text. Warnings are deliberately excluded:
     /// system audio can only ever warn (its TCC state isn't queryable), so
     /// including warnings would mean a permanent complaint in the menu.
     static func failures(_ checks: [Check]) -> [String] {

@@ -5,7 +5,7 @@ import Foundation
 ///
 /// Every FluidAudio model API defaults to `.v3`, so an omitted `version:`
 /// argument silently targets a different ~600 MB download than the weights
-/// `ParakeetEngine` actually loads — and the mistake is invisible, because the
+/// `ParakeetEngine` actually loads, and the mistake is invisible, because the
 /// engine then downloads v2 anyway on the first transcription. Routing the
 /// engine, the doctor report, and the menu's download button through here means
 /// they cannot disagree about which model they mean.

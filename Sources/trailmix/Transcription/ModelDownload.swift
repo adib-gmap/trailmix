@@ -98,7 +98,7 @@ final class ModelDownload {
         if let error {
             let message = error.localizedDescription
             Log.warn("model download failed: \(message)")
-            notifyUser(title: "trailmix — model download failed", body: message)
+            notifyUser(title: "trailmix: model download failed", body: message)
             apply(.failed(message))
             return
         }
@@ -109,14 +109,14 @@ final class ModelDownload {
         guard ParakeetModel.isPresent else {
             let message = "download completed but the model files are missing"
             Log.warn("model download failed: \(message)")
-            notifyUser(title: "trailmix — model download failed", body: message)
+            notifyUser(title: "trailmix: model download failed", body: message)
             apply(.failed(message))
             return
         }
 
         Log.info("transcription model ready")
         notifyUser(
-            title: "trailmix — transcription model ready",
+            title: "trailmix: transcription model ready",
             body: "recordings will now transcribe without downloading first"
         )
         apply(.present)

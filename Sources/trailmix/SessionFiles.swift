@@ -4,8 +4,8 @@ import Foundation
 ///
 /// One place, because these strings were previously spelled out in five and a
 /// rename meant finding all of them. They are also the app's contract with
-/// whatever the user points at the folder next — an `on_stop` hook, a script,
-/// a Finder habit — so changing one is a user-facing change, not a refactor.
+/// whatever the user points at the folder next (an `on_stop` hook, a script,
+/// a Finder habit), so changing one is a user-facing change, not a refactor.
 enum SessionFiles {
     /// The two raw capture tracks. Separate on purpose: speech models do
     /// better on clean single-source audio, and one file per source is free
