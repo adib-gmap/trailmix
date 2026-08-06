@@ -168,6 +168,8 @@ The two `mixed.*` files are the ones to send someone. Both contain every audio s
 
 CAF and MP4 behave differently if trailmix dies mid-recording. CAF needs no finalization pass, so everything already written to `mic.caf` and `system.caf` stays readable through a `kill -9`, a panic, or a power loss. `mixed.mp4` does need one, and without it the video won't open. Quitting normally, or any signal trailmix can catch, finalizes it correctly.
 
+A session that never stopped cleanly is picked up on the next launch: trailmix rebuilds its `meta.json` from what's on disk, mixes the audio, and transcribes it. The video is the one thing that can't be recovered, since an unfinalized MP4 has no index to read.
+
 mp4 rather than mov because the point of that file is that someone can open it. That's only half a promise, though: HEVC inside mp4 still needs a codec Windows doesn't always ship, so set `"codec": "h264"` if playing anywhere matters more than halving the file size.
 
 ### What "computer audio" actually captures
@@ -234,6 +236,10 @@ Parsed once at startup. Menu selections are written back here, preserving any ke
 - `transcription.enabled`: set `false` to just record.
 - `on_stop`: shell command spawned with the session directory as its argument, **after the transcript is written** (or right after recording if transcription is disabled, or if there was no audio to transcribe). Wire it to whatever comes next: summarization, filing, indexing.
 
+## What's next
+
+On-device AI summaries, coming soon: an optional summary written next to the transcript, generated locally with llama.cpp so nothing leaves the machine. Off by default, and it downloads nothing until you ask for it.
+
 ## Development
 
 ```sh
@@ -273,7 +279,11 @@ The app icon is generated, not checked in. `Scripts/make-icon.swift` renders the
 
 ### Tests
 
-`make test` runs the suite: no model, no network, no recording, a few milliseconds. It covers the parts where a wrong answer would be silent rather than loud. The duration parser behind *Stop after*, the session filenames an `on_stop` hook depends on, and the audio writer, which is fed synthetic sample buffers in the shape ScreenCaptureKit delivers and checked by decoding the file back: the worst bugs this project has had all produced a recording of the right length containing nothing at all. Starting and stopping a real capture still needs a click, a screen, and a microphone, and has no tests.
+`make test` runs the suite: 83 tests, no model, no network, no capture, under a second. It covers the parts where a wrong answer would be silent rather than loud, since every serious bug this project has had produced a recording of the right length containing nothing at all.
+
+The duration parser behind *Stop after*, the session filenames an `on_stop` hook depends on, the permission gate, and two things that go all the way to a file on disk. The audio writer is fed synthetic sample buffers in the shape ScreenCaptureKit delivers, encoded by the real AAC encoder, and checked by decoding the result back. The remux is given a video synthesized frame by frame, so the composition, the passthrough export, and the verify-then-replace all run for real.
+
+Starting and stopping a live capture still needs a click, a screen, and a microphone, and has no tests.
 
 ### Diagnostics
 
@@ -312,7 +322,7 @@ trailmix timer 9h     # rejected: 8 hours is the longest a recording can be set 
 - Computer audio is captured per *application*, and which applications depends on the *Video Capture* setting; see [What "computer audio" actually captures](#what-computer-audio-actually-captures). With None or a display selected it really is everything the Mac plays, notification dings and music included.
 - **Screen Recording permission is required for every recording**, even audio only. `SCStream` always needs a content filter, so audio-only capture still attaches to a display. The menu bar's *Permissions* submenu reports the real grant state without prompting; `make doctor` reports your terminal's, for the reason in [First launch and permissions](#5-first-launch-and-permissions).
 - Echo cancellation brings automatic gain control and noise suppression with it, and ducks other audio slightly while recording. Both are macOS behaviours that cannot be separated from it. `"echo_cancellation": false` or headphones if that matters.
-- `mixed.m4a` and the audio inside `mixed.mp4` are built *after* the recording stops, so they appear a moment later than the other files. A crash in that window leaves the raw tracks intact but no mixed versions, and nothing regenerates them.
+- `mixed.m4a` and the audio inside `mixed.mp4` are built *after* the recording stops, so they appear a moment later than the other files. A crash in that window leaves the raw tracks intact and no mixed versions; the next launch builds them, along with the transcript, when it picks the session back up.
 - Parakeet v2 is English-only. Other languages will come with the Whisper engine.
 - Permissions are keyed to the code signature. Ad-hoc signing keys them to the binary's hash, so every rebuild looks like a different app to macOS and re-prompts. A stable certificate (build step 3) fixes that.
 - The app is `LSUIElement`, so it has no Dock icon and doesn't appear in ⌘-Tab. The menu bar is the only place it exists while running.

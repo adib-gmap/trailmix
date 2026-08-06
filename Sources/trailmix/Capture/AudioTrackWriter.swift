@@ -36,6 +36,9 @@ final class AudioTrackWriter: @unchecked Sendable {
     private var outputFormat: AVAudioFormat?
     private var failed = false
     private var firstBuffer: Date?
+    /// Set by `close()` and never cleared. See `append`: without it, a buffer
+    /// arriving after the close reopens the file and erases the recording.
+    private var closed = false
 
     /// - Parameter downmixToMono: true for the mic track. Parakeet wants one
     ///   channel, and the mic's native format follows the capture device, so
@@ -99,12 +102,23 @@ final class AudioTrackWriter: @unchecked Sendable {
     /// track whose every buffer fails to convert never counts as having
     /// written anything. That is what stops a header-only file from being
     /// listed in meta.json as a real track.
+    ///
+    /// A buffer arriving after `close()` is dropped, and that guard is
+    /// load-bearing rather than tidy. Reopening lazily is what makes the first
+    /// buffer's format decide the file, but `AVAudioFile(forWriting:)` erases
+    /// whatever is already at the path, so one late buffer replaces the whole
+    /// recording with a fraction of a second of audio, silently. Buffers do
+    /// arrive after the close: `stream(_:didStopWithError:)` closes both
+    /// writers while the mic engine is still running and its tap still firing,
+    /// and `stop()` gives up on `stopCapture()` after five seconds and closes
+    /// regardless while the stream may still be delivering.
     func append(_ source: AVAudioPCMBuffer) {
         guard source.frameLength > 0 else { return }
 
         lock.lock()
         defer { lock.unlock() }
 
+        guard !closed else { return }
         if firstBuffer == nil { firstBuffer = Date() }
         if file == nil {
             do {
@@ -132,10 +146,12 @@ final class AudioTrackWriter: @unchecked Sendable {
         }
     }
 
-    /// Finalize. Idempotent; safe to call from a signal handler path.
+    /// Finalize. Idempotent, and terminal: the track cannot be reopened, so a
+    /// late buffer is dropped rather than erasing the file. See `append`.
     func close() {
         lock.lock()
         defer { lock.unlock() }
+        closed = true
         file = nil
         converter = nil
     }

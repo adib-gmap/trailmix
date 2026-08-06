@@ -190,6 +190,7 @@ actor TranscriptionCoordinator {
         while !queue.isEmpty {
             let dir = queue.removeFirst()
             publish(.transcribing(session: dir.lastPathComponent, queued: queue.count))
+            await backfillMixedFiles(in: dir)
             do {
                 try await transcribe(dir)
                 notifyUser(
@@ -215,6 +216,33 @@ actor TranscriptionCoordinator {
         // An enqueue that landed between the loop exiting and the release
         // finishing would otherwise sit until the next enqueue.
         drainIfIdle()
+    }
+
+    /// Build `mixed.m4a` (and swap it into the video) for a session that never
+    /// got one.
+    ///
+    /// `AppController.stopSession` runs the mix and the remux before it
+    /// enqueues, so for a session that stopped normally this finds the file
+    /// already there and does nothing. The case it exists for is the one that
+    /// didn't stop normally: a session recovered by `resumePending` reached
+    /// this queue without ever passing through `stopSession`, and so had the
+    /// tracks and eventually a transcript but no playable audio file at all.
+    /// Same for a session that crashed in the window between `meta.json` and
+    /// the mix. Nothing else regenerated either of them.
+    ///
+    /// Safe to reach for on every job because both steps are guarded on the
+    /// mix being absent, so this never re-encodes anything or replaces a video
+    /// that already carries the full mix.
+    private func backfillMixedFiles(in dir: URL) async {
+        let mixed = dir.appendingPathComponent(SessionFiles.mixedAudio)
+        guard !FileManager.default.fileExists(atPath: mixed.path) else { return }
+        await Mixdown.run(in: dir)
+        // Only worth attempting if the mix actually got built; Mixdown declines
+        // a session with no audio, and Remux has nothing to swap in without it.
+        // A hard-killed session's video is unfinalized and unreadable, so this
+        // warns and leaves it alone, which is the honest outcome.
+        guard FileManager.default.fileExists(atPath: mixed.path) else { return }
+        await Remux.mixedAudioIntoVideo(in: dir)
     }
 
     private func transcribe(_ dir: URL) async throws {

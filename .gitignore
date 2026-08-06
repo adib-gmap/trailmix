@@ -12,4 +12,8 @@ STATUS.md
 CLAUDE.md
 PLAN.md
 
+# Per-checkout agent settings. Ignored here rather than only in a personal
+# global gitignore, so a clone doesn't commit one by accident.
+.claude/
+
 .DS_Store

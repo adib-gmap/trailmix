@@ -323,6 +323,87 @@ struct AudioTrackWriterTests {
         }
     }
 
+    /// A buffer arriving after the close must not erase the recording.
+    ///
+    /// The file is opened lazily from the first buffer's format, and
+    /// `AVAudioFile(forWriting:)` truncates whatever is already at the path. So
+    /// before `close()` was made terminal, one late buffer reopened the file
+    /// and replaced eight buffers of audio with one: measured here at 96000
+    /// frames before and 12000 after, with nothing logged and a file that still
+    /// plays. The right length is the *only* thing this project's silent-audio
+    /// bugs have ever got wrong, and this one gets even that right.
+    ///
+    /// It is reachable two ways, and the first is not a race at all.
+    /// `stream(_:didStopWithError:)` closes both writers without stopping the
+    /// mic engine, so every tap callback between there and
+    /// `MicrophoneCapture.stop()` lands after the close: that is a captured
+    /// window being shut mid-recording, and it takes a main-actor hop plus a
+    /// bounded `stopCapture()` to come back. `stop()` is the second: it gives
+    /// up on `stopCapture()` after five seconds and closes anyway, while the
+    /// stream may still be delivering system audio.
+    @Test("a buffer arriving after close doesn't erase the recording")
+    func lateBufferDoesNotEraseTheFile() throws {
+        try inTemporaryDirectory { dir in
+            let url = dir.appendingPathComponent(SessionFiles.system)
+            let writer = AudioTrackWriter(url: url, downmixToMono: false)
+            for _ in 0 ..< 8 {
+                writer.append(try sampleBuffer(from: try tone(channels: 2)))
+            }
+            writer.close()
+            let afterClose = try decode(url).frames
+
+            writer.append(try sampleBuffer(from: try tone(channels: 2)))
+            writer.append(try tone(channels: 2))
+
+            let afterLateBuffers = try decode(url)
+            #expect(
+                afterLateBuffers.frames == afterClose,
+                "a late buffer reopened the file and erased the recording"
+            )
+            #expect(!afterLateBuffers.isSilent)
+        }
+    }
+
+    /// The mic track's own entry point, since the guaranteed-window case above
+    /// is the tap and not the stream.
+    @Test("a late tap buffer doesn't erase the mic track")
+    func lateTapBufferDoesNotEraseTheFile() throws {
+        try inTemporaryDirectory { dir in
+            let url = dir.appendingPathComponent(SessionFiles.mic)
+            let writer = AudioTrackWriter(url: url, downmixToMono: true)
+            for _ in 0 ..< 8 {
+                writer.append(try tone(channels: 1))
+            }
+            writer.close()
+            let afterClose = try decode(url).frames
+
+            for _ in 0 ..< 4 {
+                writer.append(try tone(channels: 1))
+            }
+
+            #expect(try decode(url).frames == afterClose)
+        }
+    }
+
+    /// A track that received nothing before the close stays absent rather than
+    /// being conjured into existence by a late buffer. `wroteAnything` is what
+    /// puts a track in meta.json, and a file created after the session wrote
+    /// its metadata is one the transcriber is never told about.
+    @Test("a late buffer on an empty track creates no file")
+    func lateBufferOnEmptyTrackCreatesNothing() throws {
+        try inTemporaryDirectory { dir in
+            let url = dir.appendingPathComponent(SessionFiles.mic)
+            let writer = AudioTrackWriter(url: url, downmixToMono: true)
+            writer.close()
+
+            writer.append(try tone(channels: 1))
+
+            #expect(!FileManager.default.fileExists(atPath: url.path))
+            #expect(!writer.wroteAnything)
+            #expect(writer.firstBufferAt == nil)
+        }
+    }
+
     /// The file is opened from the first buffer's format, because neither
     /// ScreenCaptureKit nor a voice-processing node commits to one until samples
     /// flow. Nothing should exist on disk before then.

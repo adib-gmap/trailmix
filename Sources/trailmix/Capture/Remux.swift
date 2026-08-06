@@ -37,7 +37,7 @@ enum Remux {
         else { return }
 
         do {
-            try await swap(video: video, audio: audio)
+            try await swap(video: video, audio: audio, videoOffsetMs: videoOffsetMs(in: dir))
             Log.info("\(dir.lastPathComponent): \(video.lastPathComponent) now carries the mixed audio")
         } catch {
             // The original is untouched on every failure path, so this
@@ -46,7 +46,23 @@ enum Remux {
         }
     }
 
-    private static func swap(video: URL, audio: URL) async throws {
+    /// How far the video track started after the earliest track in the session,
+    /// which is the same zero point `mixed.m4a` was built around.
+    ///
+    /// Zero for a session recorded before offsets were captured, for one
+    /// recovered after a hard kill, and for any session where the video really
+    /// did come first, which is the common case.
+    static func videoOffsetMs(in dir: URL) -> Int {
+        guard
+            let data = try? Data(contentsOf: dir.appendingPathComponent(SessionFiles.meta)),
+            let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+            let offsets = json["start_offset_ms"] as? [String: Int],
+            let offset = offsets["video"]
+        else { return 0 }
+        return max(0, offset)
+    }
+
+    private static func swap(video: URL, audio: URL, videoOffsetMs: Int) async throws {
         let composition = AVMutableComposition()
 
         let videoAsset = AVURLAsset(url: video)
@@ -74,17 +90,28 @@ enum Remux {
                withMediaType: .audio,
                preferredTrackID: kCMPersistentTrackID_Invalid
            ) {
-            // The mix and the video share a zero point: mixed.m4a is built
-            // from start_offset_ms, which is measured from the earliest track
-            // of the session, and video is the earliest whenever there is
-            // video. Clamped to the video length so a longer audio tail can't
-            // stretch the file past its last frame.
+            // mixed.m4a's zero is the *earliest* track of the session, which is
+            // not necessarily the video: audio and screen buffers arrive off
+            // the same SCStream in whichever order the stream happens to
+            // deliver them, and `start_offset_ms` records that per track. So
+            // the mix is read from the video's own offset rather than from its
+            // start, which is what puts the two on the same clock. Usually the
+            // video is first and the offset is zero, making this a no-op; when
+            // it isn't, this is the difference between synced audio and audio
+            // running early by however long the video took to produce a frame.
+            //
+            // Clamped to the video length so a longer audio tail can't stretch
+            // the file past its last frame.
             let audioDuration = try await audioAsset.load(.duration)
-            try destAudio.insertTimeRange(
-                CMTimeRange(start: .zero, duration: min(audioDuration, duration)),
-                of: sourceAudio,
-                at: .zero
-            )
+            let start = CMTime(value: CMTimeValue(videoOffsetMs), timescale: 1000)
+            let available = audioDuration - start
+            if available > .zero {
+                try destAudio.insertTimeRange(
+                    CMTimeRange(start: start, duration: min(available, duration)),
+                    of: sourceAudio,
+                    at: .zero
+                )
+            }
         }
 
         guard let export = AVAssetExportSession(
