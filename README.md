@@ -1,10 +1,10 @@
 # trailmix
 
-A minimal, fully local macOS recorder + transcriber. Pick your sources from the menu bar (computer audio, microphone, and optionally a window or a whole display), then record. Audio tracks stay separate so trailmix can transcribe them on-device into a source-tagged transcript. Nothing ever leaves the machine.
+Record and transcribe meetings and webinars on-device.
 
-Named for what you eat on a long walk, and a nod to [Granola](https://www.granola.ai/), whose job it does without sending your meetings anywhere. One Swift executable, a menu-bar tray, no window.
+Trailmix is a minimal, fully local macOS recorder + transcriber. Pick your sources from the menu bar (computer audio, microphone, and optionally a window or a whole display), then record. Trailmix records separate audio tracks, writes out a transcript tagged with who's speaking, and combines audio and video capture into a single MP4 file (and a combined audio-only M4A). Nothing ever leaves the machine. One Swift executable, a menu-bar tray, no window.
 
-**Requires:** macOS 15 or newer (ScreenCaptureKit's microphone output type and recording-to-file both landed in 15). Apple Silicon strongly recommended for transcription speed.
+**Requires:** macOS 15 or newer. Apple Silicon strongly recommended for transcription speed.
 
 ## Build and install
 
