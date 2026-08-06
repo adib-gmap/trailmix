@@ -330,4 +330,4 @@ trailmix timer 9h     # rejected: 8 hours is the longest a recording can be set 
 
 ## License
 
-[MIT](LICENSE).
+[FSL-1.1-MIT](LICENSE), a fair-source license. You can use, modify, and self-host this freely, but you can't offer it (or a substitute for it) as a competing commercial product or service. Each version converts to plain MIT two years after its release date, so older releases become fully open source over time.

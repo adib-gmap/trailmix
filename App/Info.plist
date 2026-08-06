@@ -32,7 +32,7 @@
     <key>LSUIElement</key>
     <true/>
     <key>NSHumanReadableCopyright</key>
-    <string>MIT licensed. Everything stays on this Mac.</string>
+    <string>Copyright 2026 Stephen D. Turner. FSL-1.1-MIT licensed. Everything stays on this Mac.</string>
     <key>NSMicrophoneUsageDescription</key>
     <string>Trailmix records your microphone during meetings so you can transcribe them later. Audio never leaves this Mac.</string>
     <key>NSAudioCaptureUsageDescription</key>

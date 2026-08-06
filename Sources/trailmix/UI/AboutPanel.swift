@@ -58,8 +58,8 @@ enum AboutPanel {
         )
         text.append(link("Source code", to: sourceURL, base: body))
         // Outside the link: it labels the licence of what the link points at,
-        // and clicking "(MIT)" landing on the repo would be a small lie.
-        text.append(NSAttributedString(string: " (MIT)\n", attributes: body))
+        // and clicking "(FSL-1.1-MIT)" landing on the repo would be a small lie.
+        text.append(NSAttributedString(string: " (FSL-1.1-MIT)\n", attributes: body))
         text.append(NSAttributedString(string: "Developed by ", attributes: body))
         text.append(link("Stephen Turner", to: authorURL, base: body))
         return text
