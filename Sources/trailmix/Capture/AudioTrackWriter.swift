@@ -98,10 +98,14 @@ final class AudioTrackWriter: @unchecked Sendable {
     /// neither ScreenCaptureKit nor a voice-processing input node commits to
     /// one until samples actually flow.
     ///
-    /// Note that `firstBuffer` is set here rather than on the way in, so a
-    /// track whose every buffer fails to convert never counts as having
-    /// written anything. That is what stops a header-only file from being
-    /// listed in meta.json as a real track.
+    /// Note that `firstBuffer` is published only once a write has actually
+    /// landed, so a track whose file can't be opened or whose every buffer
+    /// fails to convert never counts as having written anything. That is what
+    /// stops a path that doesn't exist from being listed in meta.json as a real
+    /// track: `wroteAnything` reads this field, and setting it on the way in
+    /// meant an unwritable recordings folder reported a failure *and* a track.
+    /// The timestamp is taken on arrival rather than after the encode, since it
+    /// is the track's start and not the moment the encoder caught up.
     ///
     /// A buffer arriving after `close()` is dropped, and that guard is
     /// load-bearing rather than tidy. Reopening lazily is what makes the first
@@ -119,7 +123,7 @@ final class AudioTrackWriter: @unchecked Sendable {
         defer { lock.unlock() }
 
         guard !closed else { return }
-        if firstBuffer == nil { firstBuffer = Date() }
+        let arrival = Date()
         if file == nil {
             do {
                 try openFile(sourceFormat: source.format)
@@ -143,7 +147,9 @@ final class AudioTrackWriter: @unchecked Sendable {
             }
         } catch {
             reportOnce("track write failed: \(error)")
+            return
         }
+        if firstBuffer == nil { firstBuffer = arrival }
     }
 
     /// Finalize. Idempotent, and terminal: the track cannot be reopened, so a

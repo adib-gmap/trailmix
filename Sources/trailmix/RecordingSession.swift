@@ -111,11 +111,27 @@ final class RecordingSession {
         // Atomic, like every other write to this file. Its mere presence is
         // what tells `resumePending` the session stopped cleanly, so a
         // half-written one would mark a session done and then fail to parse.
-        if let data = try? JSONSerialization.data(
-            withJSONObject: meta,
-            options: [.prettyPrinted, .sortedKeys]
-        ) {
-            try? data.write(to: dir.appendingPathComponent(SessionFiles.meta), options: .atomic)
+        //
+        // Reported rather than swallowed. This file is the recovery boundary:
+        // without it the session is indistinguishable from one that was killed
+        // mid-recording, and the offsets that align the transcript and the mix
+        // are gone for good, since they can't be reconstructed after the fact.
+        // A recording that lost its metadata still transcribes, so this is a
+        // warning and not a failure, but it is not nothing and it used to pass
+        // in complete silence.
+        do {
+            let data = try JSONSerialization.data(
+                withJSONObject: meta,
+                options: [.prettyPrinted, .sortedKeys]
+            )
+            try data.write(to: dir.appendingPathComponent(SessionFiles.meta), options: .atomic)
+        } catch {
+            Log.warn("\(dir.lastPathComponent): couldn't write \(SessionFiles.meta): \(error)")
+            notifyUser(
+                title: "trailmix: recording metadata not saved",
+                body: "The audio is fine, but track alignment was lost. \(error.localizedDescription)",
+                reveal: dir
+            )
         }
     }
 

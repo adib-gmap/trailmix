@@ -263,7 +263,7 @@ The executable inside the bundle takes subcommands, which is what `make run` and
 ~/Applications/Trailmix.app/Contents/MacOS/trailmix timer 1h10m
 ```
 
-`run` also takes `--stop-after` (`70`, `70m`, `1:10`, `1h10m`, `90s`), which arms the recording timer before the first click.
+`run` also takes `--stop-after` (`70`, `70m`, `1:10`, `1h10m`, `90s`), which arms the recording timer before the first click. Through `make` it is `make run OUT=/tmp/scratch STOP_AFTER=90s`, since `make` would read a leading `--stop-after` as one of its own options and stop before running anything.
 
 Always run the copy *inside a bundle*, never `.build/release/trailmix`. The bare executable carries no `Info.plist`, so it has no microphone usage string, and macOS kills the process the moment it asks for the mic.
 
@@ -279,9 +279,9 @@ The app icon is generated, not checked in. `Scripts/make-icon.swift` renders the
 
 ### Tests
 
-`make test` runs the suite: 83 tests, no model, no network, no capture, under a second. It covers the parts where a wrong answer would be silent rather than loud, since every serious bug this project has had produced a recording of the right length containing nothing at all.
+`make test` runs the suite: 102 tests, no model, no network, no capture, under a second. GitHub Actions runs the same target on every push. It covers the parts where a wrong answer would be silent rather than loud, since every serious bug this project has had produced a recording of the right length containing nothing at all.
 
-The duration parser behind *Stop after*, the session filenames an `on_stop` hook depends on, the permission gate, and two things that go all the way to a file on disk. The audio writer is fed synthetic sample buffers in the shape ScreenCaptureKit delivers, encoded by the real AAC encoder, and checked by decoding the result back. The remux is given a video synthesized frame by frame, so the composition, the passthrough export, and the verify-then-replace all run for real.
+The duration parser behind *Stop after*, the session filenames an `on_stop` hook depends on, the permission gate, the order the transcript's two files are committed in, and two things that go all the way to a file on disk. The audio writer is fed synthetic sample buffers in the shape ScreenCaptureKit delivers, encoded by the real AAC encoder, and checked by decoding the result back. The remux is given a video synthesized frame by frame, so the composition, the passthrough export, and the verify-then-replace all run for real.
 
 Starting and stopping a live capture still needs a click, a screen, and a microphone, and has no tests.
 
