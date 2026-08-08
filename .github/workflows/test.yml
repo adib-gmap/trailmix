@@ -1,0 +1,25 @@
+# The parts of trailmix a machine can check.
+#
+# That is the pure suite and nothing else. Recording needs a click, a screen and
+# a microphone, and a runner has none of the three, so `make app` is deliberately
+# not here either: it signs, and a runner has no identity, so it would prove
+# only that the ad-hoc fallback still works. What this catches is the thing that
+# actually breaks between sessions, which is a source change compiling here and
+# not on a clean checkout.
+name: test
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: toolchain
+        run: swift --version
+      - name: test
+        run: make test

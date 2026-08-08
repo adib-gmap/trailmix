@@ -15,11 +15,32 @@ actor TranscriptionCoordinator {
         case failed(session: String)
     }
 
+    enum TranscribeError: Error, CustomStringConvertible {
+        case everyTrackFailed(Int)
+        case nothingToTranscribe
+
+        var description: String {
+            switch self {
+            case .everyTrackFailed(let count):
+                return "all \(count) track(s) failed to transcribe"
+            case .nothingToTranscribe:
+                return "no audio track named in \(SessionFiles.meta) is on disk"
+            }
+        }
+    }
+
     private var queue: [URL] = []
     private var draining = false
     private var engine: TranscriptionEngine?
     private var lastFailure: String?
     private var statusHandler: (@Sendable (Status) -> Void)?
+
+    /// How many sessions are waiting to be transcribed.
+    ///
+    /// A test seam. Whether `resumePending` queued a session or only repaired
+    /// its media is the distinction the whole method turns on, and from outside
+    /// the two look identical: both leave a folder with a transcript in it.
+    var queuedCount: Int { queue.count }
 
     func setStatusHandler(_ handler: @escaping @Sendable (Status) -> Void) {
         statusHandler = handler
@@ -44,42 +65,65 @@ actor TranscriptionCoordinator {
         drainIfIdle()
     }
 
-    /// Scan the recordings root for sessions that were never transcribed:
-    /// anything without a transcript.json that either stopped cleanly
-    /// (meta.json) or still has audio on disk. Folder names sort
-    /// chronologically, so oldest-first is a name sort.
+    /// Scan the recordings root for unfinished work: anything that either
+    /// stopped cleanly (meta.json) or still has media on disk. Folder names
+    /// sort chronologically, so oldest-first is a name sort.
+    ///
+    /// Two separate questions get asked of every session it finds, and they are
+    /// deliberately not the same question. transcript.json decides whether the
+    /// audio needs transcribing; the mix and the swap have their own markers
+    /// and are repaired whatever the transcript says. Treating the transcript
+    /// as the one marker for the whole session is a bug this had: a session
+    /// whose remux failed but whose transcription then succeeded was skipped
+    /// here on every later launch, so its mixed.mp4 never got the microphone
+    /// and nothing was ever going to give it one.
     ///
     /// Only called from AppController.init, before the run loop starts and so
     /// before any menu click could begin a recording. That ordering matters:
     /// a live session looks exactly like a crashed one (audio, no meta.json),
     /// so calling this while recording would transcribe a session mid-flight
     /// and leave a truncated transcript.json in its place.
-    func resumePending(root: URL) {
-        guard Config.current.transcriptionEnabled else { return }
+    ///
+    /// It awaits repairs now, so it can be in flight for a while, but the scan
+    /// itself still runs to completion before the first suspension point. A
+    /// recording started while this is repairing an older session is therefore
+    /// not in the list and cannot be touched by it.
+    func resumePending(root: URL) async {
         guard let entries = try? FileManager.default.contentsOfDirectory(
             at: root, includingPropertiesForKeys: nil
         ) else { return }
 
         let fm = FileManager.default
         var pending: [URL] = []
+        var transcribed: Set<URL> = []
         for dir in entries {
             if fm.fileExists(atPath: dir.appendingPathComponent(SessionFiles.transcript).path) {
-                continue
+                // Transcribed, unless the readable rendering is missing:
+                // transcript.json is written last precisely so that it means
+                // "finished", but a session transcribed before that ordering
+                // was fixed can have the JSON and nothing anyone can
+                // double-click. Re-render it from the data rather than
+                // transcribing the audio again.
+                Transcript.restoreReadable(in: dir)
+                transcribed.insert(dir)
             }
-            if fm.fileExists(atPath: dir.appendingPathComponent(SessionFiles.meta).path) {
-                pending.append(dir)
-            } else if !sessionFiles(in: dir).isEmpty {
-                // No meta.json means the process died before it could stop
-                // cleanly. The audio is still good, since CAF needs no
-                // finalization pass, so recover it rather than orphaning it
-                // forever. (the video will be unplayable in that case; mp4 does
-                // need finalizing. It's still recorded in the metadata.)
+            // A folder counts as a session if it stopped cleanly or still has
+            // media in it. No meta.json means the process died before it could
+            // stop cleanly; the audio is still good, since CAF needs no
+            // finalization pass, so recover it rather than orphaning it
+            // forever. (the video will be unplayable in that case; mp4 does
+            // need finalizing. It's still recorded in the metadata.)
+            if fm.fileExists(atPath: dir.appendingPathComponent(SessionFiles.meta).path)
+                || !sessionFiles(in: dir).isEmpty
+            {
                 pending.append(dir)
             }
         }
         pending.sort { $0.lastPathComponent < $1.lastPathComponent }
 
+        let transcribing = Config.current.transcriptionEnabled
         var resumed = 0
+        var repairOnly: [URL] = []
         for dir in pending where !queue.contains(dir) {
             if !fm.fileExists(atPath: dir.appendingPathComponent(SessionFiles.meta).path) {
                 do {
@@ -90,17 +134,35 @@ actor TranscriptionCoordinator {
                     continue
                 }
             }
-            // Recovery is worth doing for any session, but only audio can be
-            // transcribed. Queueing a video-only session would load ~600 MB of
-            // model to produce an empty transcript, every launch.
-            guard !audioTracks(in: dir).isEmpty else { continue }
+            // Recovery is worth doing for any session, but only untranscribed
+            // audio is worth transcribing. Queueing a video-only session would
+            // load ~600 MB of model to produce an empty transcript, every
+            // launch, and queueing an already-transcribed one would overwrite
+            // a finished transcript with a second run of the same audio.
+            guard transcribing, !transcribed.contains(dir), !audioTracks(in: dir).isEmpty else {
+                // Everything the queue will never see: sessions that already
+                // have a transcript, video-only sessions, and every session at
+                // all when transcription is switched off. The mix and the
+                // remux have nothing to do with transcribing, so these still
+                // get repaired. Before this they were stuck forever, since the
+                // drain was the only thing that repaired anything and they
+                // never reached it.
+                repairOnly.append(dir)
+                continue
+            }
             queue.append(dir)
             resumed += 1
         }
         if resumed > 0 {
             Log.info("resuming \(resumed) untranscribed session(s)")
         }
+        // Before the repairs, not after: a queued session is repaired at the
+        // top of its own drain job, and making transcription wait on the
+        // mixdown of a folder it isn't going to read would be backwards.
         drainIfIdle()
+        for dir in repairOnly {
+            await repairMixedFiles(in: dir)
+        }
     }
 
     /// The audio track files a session directory actually has on disk, keyed
@@ -190,7 +252,11 @@ actor TranscriptionCoordinator {
         while !queue.isEmpty {
             let dir = queue.removeFirst()
             publish(.transcribing(session: dir.lastPathComponent, queued: queue.count))
-            await backfillMixedFiles(in: dir)
+            // Where a recovered session gets its mixed files: it reached this
+            // queue without ever passing through `stopSession`, which is what
+            // builds them for a session that stopped normally. A no-op for one
+            // that did, and for anything already repaired.
+            await repairMixedFiles(in: dir)
             do {
                 try await transcribe(dir)
                 notifyUser(
@@ -230,35 +296,69 @@ actor TranscriptionCoordinator {
     /// Same for a session that crashed in the window between `meta.json` and
     /// the mix. Nothing else regenerated either of them.
     ///
-    /// Safe to reach for on every job because both steps are guarded on the
-    /// mix being absent, so this never re-encodes anything or replaces a video
-    /// that already carries the full mix.
-    private func backfillMixedFiles(in dir: URL) async {
-        let mixed = dir.appendingPathComponent(SessionFiles.mixedAudio)
-        guard !FileManager.default.fileExists(atPath: mixed.path) else { return }
+    /// Safe to reach for on every job: each step is guarded on its own
+    /// completion, so this never re-encodes a finished mix or re-swaps a video
+    /// that already carries one.
+    ///
+    /// Those guards live in `Mixdown.run` and `Remux.alreadySwapped`, and not
+    /// also here. A second copy of the mix guard is what this had, and it was
+    /// wrong in the way duplicated guards usually are: it tested existence
+    /// while the real one tests readability, so it took the decision away from
+    /// the code that knew better. A `mixed.m4a` left half-written by an
+    /// interrupted export never reached the check that would have rebuilt it,
+    /// and `Remux` then refused it on every launch, correctly and forever.
+    ///
+    /// The two steps are guarded *separately*, which is the whole point. The
+    /// presence of `mixed.m4a` used to stand for both, so a session that
+    /// crashed in the window between the mixdown and the swap, or whose swap
+    /// failed once, returned here and was declared finished on every later
+    /// launch: `mixed.mp4` kept the system audio it came off the stream with
+    /// and never got the microphone. `Remux` records the swap in meta.json
+    /// after it lands, and that marker is what closes it.
+    private func repairMixedFiles(in dir: URL) async {
         await Mixdown.run(in: dir)
+
         // Only worth attempting if the mix actually got built; Mixdown declines
         // a session with no audio, and Remux has nothing to swap in without it.
         // A hard-killed session's video is unfinalized and unreadable, so this
         // warns and leaves it alone, which is the honest outcome.
+        let mixed = dir.appendingPathComponent(SessionFiles.mixedAudio)
         guard FileManager.default.fileExists(atPath: mixed.path) else { return }
+        guard SessionFiles.video(in: dir) != nil, !Remux.alreadySwapped(in: dir) else { return }
         await Remux.mixedAudioIntoVideo(in: dir)
     }
 
     private func transcribe(_ dir: URL) async throws {
         let meta = try SessionMeta.read(from: dir)
+        let fm = FileManager.default
+        var tracks: [SessionMeta.Track] = []
+        for track in meta.tracks {
+            if fm.fileExists(atPath: dir.appendingPathComponent(track.file).path) {
+                tracks.append(track)
+            } else {
+                log(dir, "skipping missing track \(track.file)")
+            }
+        }
+        // Established before the model loads, and separately from the failure
+        // count below, because those are two different nothings. A session with
+        // no readable track cannot produce a transcript, and writing an empty
+        // one anyway would commit transcript.json: the session would be marked
+        // finished forever, the menu would say "transcript ready", and the file
+        // would say nothing was ever said. Throwing here costs a retry next
+        // launch and no model load.
+        guard !tracks.isEmpty else { throw TranscribeError.nothingToTranscribe }
+
         let engine = try await preparedEngine()
 
         var merged: [Transcript.Segment] = []
-        for track in meta.tracks {
+        var attempted = 0
+        var succeeded = 0
+        for track in tracks {
             let audio = dir.appendingPathComponent(track.file)
-            guard FileManager.default.fileExists(atPath: audio.path) else {
-                log(dir, "skipping missing track \(track.file)")
-                continue
-            }
             log(dir, "transcribing \(track.file) (\(engine.name))")
             // One bad track (empty, truncated) shouldn't cost us the other's
             // transcript, so log it and keep going.
+            attempted += 1
             let segments: [TranscriptSegment]
             do {
                 segments = try await engine.transcribe(audio)
@@ -266,6 +366,7 @@ actor TranscriptionCoordinator {
                 log(dir, "skipping \(track.file): \(error)")
                 continue
             }
+            succeeded += 1
             let offset = TimeInterval(track.offsetMs) / 1000
             merged += segments.map {
                 Transcript.Segment(
@@ -277,6 +378,21 @@ actor TranscriptionCoordinator {
             }
         }
         merged.sort { $0.start_ms < $1.start_ms }
+
+        // Every track threw. Writing the transcript anyway would commit an
+        // empty one, with the same permanent, silent result as above. A model
+        // that failed to load, or a session whose tracks are all truncated,
+        // deserves the retry on the next launch. Zero segments from a track
+        // that transcribed fine is a different thing entirely, and still
+        // succeeds: silence really does transcribe to nothing.
+        //
+        // No `attempted == 0` escape here. There is at least one track on disk
+        // by this point, so the only way to attempt nothing is for it to
+        // vanish mid-run, and a transcript committed on the strength of that
+        // is exactly the empty one this is meant to prevent.
+        guard succeeded > 0 else {
+            throw TranscribeError.everyTrackFailed(attempted)
+        }
 
         let transcript = Transcript(
             engine: engine.name,
@@ -387,7 +503,12 @@ private struct SessionMeta {
 
 /// Canonical transcript. Property names are the JSON schema: this struct
 /// exists to be serialized.
-private struct Transcript: Codable {
+///
+/// Internal rather than private so the tests can drive `write` and
+/// `restoreReadable` directly. Which file lands first is the whole difference
+/// between a session that can be retried and one permanently marked done, and
+/// that is not something the coordinator can be asked about from outside.
+struct Transcript: Codable {
     struct Segment: Codable {
         let speaker: String
         let start_ms: Int
@@ -400,22 +521,51 @@ private struct Transcript: Codable {
     let created_at: String
     let segments: [Segment]
 
-    /// Write transcript.json and the readable rendering. Both writes are
+    /// Write the readable rendering and then transcript.json. Both writes are
     /// atomic (temp file + rename), so a partially written transcript never
     /// exists on disk, and resumePending treats presence of transcript.json as
     /// "done".
+    ///
+    /// The order is that way round because of what "done" means. transcript.json
+    /// is the commit marker, so it has to be the last thing written: with the
+    /// JSON first, a process that died between the two writes left a session
+    /// permanently marked finished with no readable transcript in it, and
+    /// nothing would ever retry it.
     ///
     /// The readable one is `transcript.md.txt`, not `transcript.md`. It is
     /// markdown and the double extension keeps that visible, but `.txt` is
     /// what makes it open in something on a Mac that has never had a markdown
     /// editor installed. A file nobody can double-click is not readable.
     func write(to dir: URL) throws {
+        try Data(rendered(title: dir.lastPathComponent).utf8)
+            .write(to: dir.appendingPathComponent(SessionFiles.readableTranscript), options: .atomic)
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         try encoder.encode(self)
             .write(to: dir.appendingPathComponent(SessionFiles.transcript), options: .atomic)
-        try Data(rendered(title: dir.lastPathComponent).utf8)
-            .write(to: dir.appendingPathComponent(SessionFiles.readableTranscript), options: .atomic)
+    }
+
+    /// Re-render `transcript.md.txt` from `transcript.json` when the data is
+    /// there and the readable file isn't.
+    ///
+    /// For sessions transcribed before the write order above was fixed. The
+    /// JSON holds everything the rendering is made of, so this costs a file
+    /// read rather than another pass over the audio, and it is a no-op the
+    /// moment either file is in the state it should be.
+    static func restoreReadable(in dir: URL) {
+        let readable = dir.appendingPathComponent(SessionFiles.readableTranscript)
+        guard !FileManager.default.fileExists(atPath: readable.path) else { return }
+        guard
+            let data = try? Data(contentsOf: dir.appendingPathComponent(SessionFiles.transcript)),
+            let transcript = try? JSONDecoder().decode(Transcript.self, from: data)
+        else { return }
+        do {
+            try Data(transcript.rendered(title: dir.lastPathComponent).utf8)
+                .write(to: readable, options: .atomic)
+            Log.info("\(dir.lastPathComponent): re-rendered \(SessionFiles.readableTranscript)")
+        } catch {
+            Log.warn("\(dir.lastPathComponent): can't re-render \(SessionFiles.readableTranscript): \(error)")
+        }
     }
 
     private func rendered(title: String) -> String {

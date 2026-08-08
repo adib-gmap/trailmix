@@ -158,6 +158,24 @@ final class CaptureStream: NSObject, @unchecked Sendable {
             do {
                 try microphone.start()
             } catch {
+                // Unless the microphone was the whole recording. Degrading
+                // there leaves a session that captures nothing at all: a 2×2
+                // video nobody asked for, no audio, and a menu counting up the
+                // elapsed time of a recording that isn't happening. Take the
+                // stream back down and let the failure reach the click.
+                guard sources.computerAudio || sources.target.capturesVideo else {
+                    Log.warn("microphone capture failed to start, and it was the only source: \(error)")
+                    // Taken down the ordinary stop path rather than by hand.
+                    // stopCapture() has hung before, which is why stop() bounds
+                    // it at five seconds and moves on; awaiting it raw here
+                    // would hand the click an unbounded wait, and a start that
+                    // never returns wedges the menu just as thoroughly as a
+                    // stop that never returns. It also unwinds the half-started
+                    // mic engine, which still has a tap to remove, and closes
+                    // the empty writer instead of abandoning it.
+                    await stop()
+                    throw error
+                }
                 Log.warn("microphone capture failed to start: \(error)")
                 notifyUser(
                     title: "trailmix: microphone unavailable",

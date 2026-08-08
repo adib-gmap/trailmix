@@ -175,10 +175,39 @@ app: build $(ICNS)
 	fi
 	@echo "built $(APP)"
 
+# Quit a running copy and wait for it to actually be gone.
+#
+# pkill returns as soon as the signal is delivered, not when the process has
+# exited, and trailmix's SIGTERM handler finalizes a live recording before it
+# quits: stopCapture is bounded at 5 seconds and the video's finalization pass
+# at 10 more. Deleting the bundle out from under that races the shutdown and
+# leaves a half-updated app beside a possibly unplayable video. Those two
+# bounds come to 15 seconds on their own, before the mixdown and the metadata
+# write that follow them, so 20 is the wait and not 15.
+#
+# Still running at the end of it means the shutdown is stuck, and the only
+# thing worth doing then is stopping. Deleting the bundle anyway is the one
+# outcome that can cost a recording, and the recording is the part that cannot
+# be rebuilt by running make again.
+define quit_running
+	pkill -x $(EXECUTABLE) 2>/dev/null || true; \
+	for _ in $$(seq 1 100); do \
+		pgrep -x $(EXECUTABLE) >/dev/null 2>&1 || break; \
+		sleep 0.2; \
+	done; \
+	if pgrep -x $(EXECUTABLE) >/dev/null 2>&1; then \
+		echo ""; \
+		echo "error: $(EXECUTABLE) is still running 20s after SIGTERM (pid $$(pgrep -x $(EXECUTABLE) | tr '\n' ' '))."; \
+		echo "       it may be finalizing a recording. removing the bundle now could break it."; \
+		echo "       wait for it to quit, or: kill -9 \$$(pgrep -x $(EXECUTABLE))"; \
+		exit 1; \
+	fi
+endef
+
 # Replace the installed copy. Anything already running is quit first; copying
 # over a live bundle leaves a half-updated app.
 install: app
-	@pkill -x $(EXECUTABLE) 2>/dev/null || true
+	@$(quit_running)
 	@mkdir -p $(INSTALL_DIR)
 	rm -rf $(INSTALLED)
 	@cp -R $(APP) $(INSTALLED) || { \
@@ -192,7 +221,7 @@ install: app
 	@echo "launch it: open $(INSTALLED)"
 
 uninstall:
-	@pkill -x $(EXECUTABLE) 2>/dev/null || true
+	@$(quit_running)
 	rm -rf $(INSTALLED)
 	@echo "removed $(INSTALLED)"
 
@@ -230,8 +259,13 @@ release: app
 # one in .build, so the process picks up the bundle's Info.plist and TCC
 # identity. The bare binary has no microphone usage string and macOS kills it
 # the moment it asks for the mic.
+# STOP_AFTER as a variable rather than passing --stop-after through: make would
+# take a leading `--` as one of its own options and fail before running
+# anything, so the documented `make run OUT=… --stop-after 90s` never worked.
+#
+#     make run OUT=/tmp/scratch STOP_AFTER=90s
 run: app
-	$(CONTENTS)/MacOS/$(EXECUTABLE) run $(if $(OUT),--out $(OUT),)
+	$(CONTENTS)/MacOS/$(EXECUTABLE) run $(if $(OUT),--out $(OUT),) $(if $(STOP_AFTER),--stop-after $(STOP_AFTER),)
 
 doctor: app
 	@$(CONTENTS)/MacOS/$(EXECUTABLE) doctor

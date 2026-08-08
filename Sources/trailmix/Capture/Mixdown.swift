@@ -17,12 +17,14 @@ enum Mixdown {
         case noTracks
         case exportUnavailable
         case exportFailed(Error?)
+        case verificationFailed
 
         var description: String {
             switch self {
             case .noTracks: return "no audio tracks to mix"
             case .exportUnavailable: return "the system offers no m4a export preset"
             case .exportFailed(let e): return "export failed\(e.map { ": \($0)" } ?? "")"
+            case .verificationFailed: return "the exported mix didn't come back readable"
             }
         }
     }
@@ -33,9 +35,29 @@ enum Mixdown {
     /// the same way the transcript does. The mic and system streams do not
     /// begin on the same buffer and a naive concatenation at zero would drift
     /// them apart by a couple of hundred milliseconds.
+    ///
+    /// `mixed.m4a` is also the marker that says the mix is done, so what this
+    /// does with an existing one decides whether a session can ever be
+    /// repaired. Existence alone is not enough to go on: a process killed
+    /// mid-export leaves bytes at that name too. meta.json records the mix only
+    /// after the export returned and the result read back, which makes a
+    /// recorded mix free to trust; an unrecorded one is either from a build
+    /// that predates the record or the debris of an interrupted export, and is
+    /// read back before it is believed. Anything unreadable is thrown away and
+    /// built again, because nothing else in the pipeline ever will.
     static func run(in dir: URL) async {
         let existing = dir.appendingPathComponent(SessionFiles.mixedAudio)
-        guard !FileManager.default.fileExists(atPath: existing.path) else { return }
+        if FileManager.default.fileExists(atPath: existing.path) {
+            if recordedMix(in: dir) { return }
+            if await isPlayable(existing) {
+                record(SessionFiles.mixedAudio, in: dir)
+                return
+            }
+            Log.warn(
+                "\(dir.lastPathComponent): \(SessionFiles.mixedAudio) isn't readable, rebuilding it"
+            )
+            try? FileManager.default.removeItem(at: existing)
+        }
 
         do {
             try await write(in: dir)
@@ -92,13 +114,53 @@ enum Mixdown {
             presetName: AVAssetExportPresetAppleM4A
         ) else { throw MixError.exportUnavailable }
 
+        // Exported beside the destination and moved onto it only once it reads
+        // back, the same verify-then-replace `Remux` does and for the same
+        // reason. Exporting straight onto `mixed.m4a` means a process killed
+        // mid-export leaves a partial file wearing the name that marks the mix
+        // finished, and `run` above would skip it on every later launch.
         let output = dir.appendingPathComponent(SessionFiles.mixedAudio)
-        try? FileManager.default.removeItem(at: output)
+        let temp = dir.appendingPathComponent(SessionFiles.mixTemp)
+        try? FileManager.default.removeItem(at: temp)
         do {
-            try await export.export(to: output, as: .m4a)
+            try await export.export(to: temp, as: .m4a)
         } catch {
+            try? FileManager.default.removeItem(at: temp)
             throw MixError.exportFailed(error)
         }
+        guard await isPlayable(temp) else {
+            try? FileManager.default.removeItem(at: temp)
+            throw MixError.verificationFailed
+        }
+        // replaceItemAt needs something to replace; a first mix has nothing.
+        if FileManager.default.fileExists(atPath: output.path) {
+            _ = try FileManager.default.replaceItemAt(output, withItemAt: temp)
+        } else {
+            try FileManager.default.moveItem(at: temp, to: output)
+        }
+    }
+
+    /// Whether a file is a finished mix rather than the remains of an
+    /// interrupted export: an audio track, and a duration to go with it.
+    private static func isPlayable(_ url: URL) async -> Bool {
+        let asset = AVURLAsset(url: url)
+        guard
+            let tracks = try? await asset.loadTracks(withMediaType: .audio), !tracks.isEmpty,
+            let duration = try? await asset.load(.duration), duration.seconds > 0
+        else { return false }
+        return true
+    }
+
+    /// Whether meta.json records a finished mix under the name this session
+    /// actually has on disk. Matched rather than merely present, since a
+    /// receipt for some other filename is not a receipt for this file.
+    private static func recordedMix(in dir: URL) -> Bool {
+        guard
+            let data = try? Data(contentsOf: dir.appendingPathComponent(SessionFiles.meta)),
+            let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+            let files = json["files"] as? [String: String]
+        else { return false }
+        return files["mixed"] == SessionFiles.mixedAudio
     }
 
     private static func startOffsets(in dir: URL) -> [String: Int] {
@@ -114,21 +176,34 @@ enum Mixdown {
     /// is built after the session has already stopped and written its metadata,
     /// so this is a patch rather than part of the original write. Keeping the
     /// menu's "finishing…" window short is worth the extra read.
+    ///
+    /// Failure is logged rather than swallowed. It is recoverable (the file is
+    /// there, and the next launch reads it back and records it again), but a
+    /// silent one leaves meta.json describing a session that has a mix as one
+    /// that doesn't, which is exactly the kind of quiet disagreement between
+    /// disk and metadata this pipeline keeps having to repair.
     private static func record(_ name: String, in dir: URL) {
         let url = dir.appendingPathComponent(SessionFiles.meta)
         guard
             let data = try? Data(contentsOf: url),
             var json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
-        else { return }
+        else {
+            Log.warn("\(dir.lastPathComponent): can't record \(name) in \(SessionFiles.meta): unreadable")
+            return
+        }
 
         var files = json["files"] as? [String: String] ?? [:]
         files["mixed"] = name
         json["files"] = files
 
-        guard let updated = try? JSONSerialization.data(
-            withJSONObject: json,
-            options: [.prettyPrinted, .sortedKeys]
-        ) else { return }
-        try? updated.write(to: url, options: .atomic)
+        do {
+            let updated = try JSONSerialization.data(
+                withJSONObject: json,
+                options: [.prettyPrinted, .sortedKeys]
+            )
+            try updated.write(to: url, options: .atomic)
+        } catch {
+            Log.warn("\(dir.lastPathComponent): can't record \(name) in \(SessionFiles.meta): \(error)")
+        }
     }
 }

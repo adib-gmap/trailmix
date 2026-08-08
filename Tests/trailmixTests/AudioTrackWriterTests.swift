@@ -422,13 +422,22 @@ struct AudioTrackWriterTests {
     /// A path that can't be created is a full disk or a recordings folder that
     /// went away mid-recording. It has to be reported rather than passed over,
     /// since `failedTracks` is the only signal the user gets.
+    ///
+    /// And it must not also report a track. `firstBuffer` used to be set on the
+    /// way in, before the file was opened, so this path came back
+    /// `hadFailure == true` *and* `wroteAnything == true` at once: meta.json
+    /// then listed a track for a file that was never created, and the
+    /// transcriber was pointed at a path that doesn't exist.
     @Test("an unwritable path fails loudly rather than silently")
     func unwritablePathReportsFailure() throws {
         let url = URL(fileURLWithPath: "/no/such/directory/\(SessionFiles.mic)")
         let writer = AudioTrackWriter(url: url, downmixToMono: true)
         writer.append(try tone(channels: 1))
         #expect(writer.hadFailure)
+        #expect(!writer.wroteAnything, "a track that was never opened was reported as written")
+        #expect(writer.firstBufferAt == nil)
         writer.close()
+        #expect(!FileManager.default.fileExists(atPath: url.path))
     }
 }
 

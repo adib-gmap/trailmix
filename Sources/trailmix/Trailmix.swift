@@ -147,6 +147,16 @@ final class AppController {
     private var busy = false
     private var terminating = false
 
+    /// The start or stop currently in flight, if any.
+    ///
+    /// `busy` stops a *click* landing in the middle of one. This stops
+    /// `shutdown()` doing the same, which `busy` can't: `stopSession()` clears
+    /// `session` before it awaits the finalization, so a Quit or a SIGTERM
+    /// arriving during "Finishing…" found no session, terminated immediately,
+    /// and cut the video's finalization pass off mid-write. Termination now
+    /// awaits this first.
+    private var lifecycle: Task<Void, Never>?
+
     /// When the current recording stops itself, and whether the "stopping
     /// soon" warning has already gone out for that deadline. Both are wall
     /// clock rather than a countdown of ticks, so a machine that slept through
@@ -249,10 +259,19 @@ final class AppController {
     /// Stop any live session cleanly (finalizing files) and exit. Termination
     /// waits on the stop: the video needs a finalization pass, so quitting
     /// before it completes leaves an unplayable video.
+    ///
+    /// A stop already under way is awaited rather than raced. Its own
+    /// `stopSession()` cleared `session` before awaiting the stream, so a
+    /// second one started here would see nothing to do and terminate straight
+    /// through the finalization it was supposed to be protecting. `terminating`
+    /// then keeps any later click, timer or unexpected stop from starting
+    /// another transition behind the one that is on its way out.
     func shutdown() {
         guard !terminating else { return }
         terminating = true
+        let inFlight = lifecycle
         Task { @MainActor in
+            await inFlight?.value
             await stopSession()
             NSApp.terminate(nil)
         }
@@ -268,9 +287,14 @@ final class AppController {
         // started a *second* capture. The first stream's SCStream was then
         // overwritten and never stopped: a live recording with nothing left
         // holding it, and a menu that no longer matched anything real.
-        guard !busy else { return }
+        //
+        // `terminating` is the same guard for the other direction: the app is
+        // on its way out and `shutdown()` is already awaiting whatever was in
+        // flight, so a click landing now would start a recording nothing will
+        // ever stop.
+        guard !busy, !terminating else { return }
         busy = true
-        Task { @MainActor in
+        lifecycle = Task { @MainActor in
             defer { busy = false }
             if session == nil {
                 await startSession()
@@ -390,13 +414,13 @@ final class AppController {
     /// The timer ran out. Same shape as `handleUnexpectedStop` down to the
     /// synchronous `busy` claim, for the same reason.
     private func autoStop() {
-        guard let session, !busy else { return }
+        guard let session, !busy, !terminating else { return }
         let ran = deadline.map { $0.timeIntervalSince(session.startedAt) } ?? 0
         let dir = session.dir
         Log.info("timer reached \(RecordingLimit.clock(ran)), stopping")
 
         busy = true
-        Task { @MainActor in
+        lifecycle = Task { @MainActor in
             defer { busy = false }
             await stopSession()
             // After the stop, so the notification's reveal opens a folder that
@@ -413,11 +437,11 @@ final class AppController {
     /// was detached. Finalize what we have rather than leaving a live session
     /// that isn't recording anything.
     private func handleUnexpectedStop(_ reason: String) {
-        guard session != nil, !busy else { return }
+        guard session != nil, !busy, !terminating else { return }
         Log.warn("capture stopped on its own: \(reason)")
         notifyUser(title: "trailmix: capture stopped", body: reason)
         busy = true
-        Task { @MainActor in
+        lifecycle = Task { @MainActor in
             defer { busy = false }
             await stopSession()
         }

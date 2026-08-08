@@ -10,6 +10,7 @@ dist/
 # Working notes, deliberately untracked
 STATUS.md
 CLAUDE.md
+AGENTS.md
 PLAN.md
 
 # Per-checkout agent settings. Ignored here rather than only in a personal

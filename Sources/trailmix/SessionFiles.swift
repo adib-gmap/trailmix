@@ -19,6 +19,11 @@ enum SessionFiles {
     static let mixedAudio = "mixed.m4a"
     static let video = "mixed.mp4"
 
+    /// Where the mix is exported before it is checked and moved onto
+    /// `mixedAudio`. The final name is a completion marker, so nothing may wear
+    /// it until the bytes behind it are known to be whole.
+    static let mixTemp = "mix.tmp.m4a"
+
     /// What the video was called before 2026-08-04, and what recordings made
     /// before then still have on disk. Recovery and remuxing accept it so old
     /// sessions don't become unreadable; nothing writes it any more.
