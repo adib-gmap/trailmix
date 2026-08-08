@@ -17,12 +17,12 @@
     <key>CFBundleInfoDictionaryVersion</key>
     <string>6.0</string>
     <key>CFBundleShortVersionString</key>
-    <string>0.1.0</string>
+    <string>0.2.0</string>
     <!-- Overwritten by the Makefile at package time with the commit count:
          numeric and monotonic, which is what CFBundleVersion is specified to
          be. The value here is only what an unpackaged build would see. -->
     <key>CFBundleVersion</key>
-    <string>0.1.0</string>
+    <string>0.2.0</string>
     <key>LSMinimumSystemVersion</key>
     <string>15.0</string>
     <!-- Menu-bar only: no Dock tile, no app switcher entry. Matches the

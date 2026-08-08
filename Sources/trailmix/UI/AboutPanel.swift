@@ -28,7 +28,7 @@ enum AboutPanel {
             // "Version <applicationVersion> (<version>)" from
             // CFBundleShortVersionString and CFBundleVersion; blanking the
             // second one drops the parentheses with it rather than leaving
-            // "Version 0.1.0 ()". Only this key is overridden, so the marketing
+            // "Version X.Y.Z ()". Only this key is overridden, so the marketing
             // version still comes from App/Info.plist and stays the one place a
             // version number is written down.
             .version: "",
