@@ -143,6 +143,9 @@ final class AppController {
     private let modelDownload = ModelDownload()
     private let overlay = CaptureOverlay()
     private var session: RecordingSession?
+    /// System-wide start/stop shortcut from `hotkey` in the config. Held so
+    /// the registration lives as long as the app.
+    private var hotkey: GlobalHotkey?
     private var ticker: Timer?
     private var busy = false
     private var terminating = false
@@ -170,6 +173,18 @@ final class AppController {
     init(root: URL, warnings: [String] = [], limit: RecordingLimit? = nil) {
         self.root = root
         menuBar.onToggle = { [weak self] in self?.toggle() }
+        let spec = Config.current.hotkey
+        if let combo = GlobalHotkey.Combo.parse(spec) {
+            if let registered = GlobalHotkey(combo: combo, handler: { [weak self] in self?.toggle() }) {
+                hotkey = registered
+                menuBar.showShortcut(combo)
+                Log.info("hotkey \(combo.display) starts and stops recording")
+            } else {
+                Log.warn("hotkey \(combo.display) could not be registered; another app may hold it")
+            }
+        } else if !["", "none", "off", "false"].contains(spec.lowercased()) {
+            Log.warn("hotkey \"\(spec)\" not understood: use e.g. cmd+shift+7, or none")
+        }
         menuBar.onOpenFolder = { [weak self] in self?.openFolder() }
         menuBar.onChangeFolder = { [weak self] in self?.changeFolder() }
         menuBar.onQuit = { [weak self] in self?.shutdown() }

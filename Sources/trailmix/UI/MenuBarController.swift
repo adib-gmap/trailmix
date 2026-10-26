@@ -1,23 +1,6 @@
 import AppKit
 import Carbon.HIToolbox
 
-/// Where a system-wide record shortcut would land if one is ever wired up.
-///
-/// Kept as data rather than deleted: the choice took some working out and is
-/// the awkward part to rediscover. ⌘R is refresh nearly everywhere. ⇧⌘4 and
-/// ⇧⌘5 are macOS screenshots and Kap has taken ⇧⌘6, so 7 is the first key
-/// clear of the screen-capture range.
-///
-/// Nothing registers this today. The menu deliberately shows no shortcut,
-/// because a status-item key equivalent only fires with the menu already open.
-/// Registering it for real is `RegisterEventHotKey(kVK_ANSI_7, …)` at launch,
-/// dispatched to the same `onToggle` callback the menu item uses.
-enum Shortcut {
-    static let recordKeyCode = UInt32(kVK_ANSI_7)
-    static let recordModifiers: UInt32 = UInt32(cmdKey | shiftKey)
-    /// How it would be written in a menu, if it ever appears in one.
-    static let recordDisplay = "⇧⌘7"
-}
 
 /// Status bar item in the top-right of the menu bar. Shows recording state at
 /// a glance and provides the only persistent control surface for the daemon
@@ -147,16 +130,11 @@ final class MenuBarController: NSObject {
 
         menu.addItem(.separator())
 
-        // No key equivalent. An NSStatusItem's menu only handles one while the
-        // menu is already open, so a shortcut here buys a keystroke over just
-        // clicking the item you are looking at. Advertising one implies a
-        // global hotkey that doesn't exist.
-        //
-        // A real one means RegisterEventHotKey (Carbon, no extra TCC prompt)
-        // or an NSEvent global monitor (needs Accessibility), registered at
-        // launch and routed to `onToggle`, the same callback the click uses,
-        // so nothing below this line has to change to add it. `Shortcut.record`
-        // holds the intended default.
+        // The key equivalent is filled in by showShortcut() once the global
+        // hotkey (GlobalHotkey, from `hotkey` in the config) is registered, so
+        // the menu only advertises a shortcut that really works system-wide.
+        // An NSStatusItem's menu handles a key equivalent only while it is
+        // open; the Carbon registration is what makes it fire from anywhere.
         toggleItem = NSMenuItem(
             title: "Start recording",
             action: #selector(toggleClicked),
@@ -940,6 +918,12 @@ final class MenuBarController: NSObject {
         }
         image.isTemplate = true
         return image
+    }
+
+    /// Show the registered global shortcut next to "Start recording".
+    func showShortcut(_ combo: GlobalHotkey.Combo) {
+        toggleItem.keyEquivalent = combo.keyEquivalent
+        toggleItem.keyEquivalentModifierMask = combo.cocoaModifiers
     }
 
     @objc private func toggleClicked() { onToggle?() }

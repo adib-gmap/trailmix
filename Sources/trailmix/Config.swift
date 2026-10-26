@@ -9,6 +9,7 @@ import Foundation
 ///       "transcription": { "enabled": true, "engine": "parakeet" },
 ///       "echo_cancellation": true,
 ///       "max_recording_hours": 8,
+///       "hotkey": "cmd+shift+7",
 ///       "on_stop": "my-hook"
 ///     }
 ///
@@ -65,6 +66,9 @@ struct Config: Sendable {
     /// never writes this, since a backstop you can move from the menu is one
     /// you can move by accident.
     var maxRecordingHours: Double
+    /// System-wide start/stop shortcut, e.g. "cmd+shift+7"; "none" disables
+    /// it. See `GlobalHotkey.Combo.parse` for what is accepted.
+    var hotkey: String
     var onStop: String?
 
     static let path = Paths.config
@@ -80,6 +84,7 @@ struct Config: Sendable {
         transcriptionEngine: "parakeet",
         echoCancellation: true,
         maxRecordingHours: 8,
+        hotkey: "cmd+shift+7",
         onStop: nil
     )
 
@@ -134,6 +139,9 @@ struct Config: Sendable {
         }
         if let hours = (json["max_recording_hours"] as? NSNumber)?.doubleValue {
             config.maxRecordingHours = hours
+        }
+        if let hotkey = json["hotkey"] as? String {
+            config.hotkey = hotkey
         }
         if let cmd = json["on_stop"] as? String, !cmd.isEmpty {
             config.onStop = cmd
