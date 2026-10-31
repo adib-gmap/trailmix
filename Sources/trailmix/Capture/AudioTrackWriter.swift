@@ -39,6 +39,11 @@ final class AudioTrackWriter: @unchecked Sendable {
     /// Set by `close()` and never cleared. See `append`: without it, a buffer
     /// arriving after the close reopens the file and erases the recording.
     private var closed = false
+    /// Set while the recording is paused. Buffers are dropped rather than
+    /// written, so the track comes out gapless: paused time is simply absent
+    /// from the file, which is what keeps it on the same clock as the video
+    /// once `Remux` has cut the same ranges out of that.
+    private var paused = false
 
     /// - Parameter downmixToMono: true for the mic track. Parakeet wants one
     ///   channel, and the mic's native format follows the capture device, so
@@ -122,7 +127,7 @@ final class AudioTrackWriter: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
 
-        guard !closed else { return }
+        guard !closed, !paused else { return }
         let arrival = Date()
         if file == nil {
             do {
@@ -150,6 +155,18 @@ final class AudioTrackWriter: @unchecked Sendable {
             return
         }
         if firstBuffer == nil { firstBuffer = arrival }
+    }
+
+    /// Drop every buffer until `setPaused(false)`. The capture keeps running
+    /// (stopping and restarting the stream is what a pause is *not*), so the
+    /// gate lives here, at the one place every buffer passes through. The
+    /// source stays unaware: the mic unit and the SCStream deliver as before.
+    ///
+    /// Harmless after `close()`, since the closed guard runs first.
+    func setPaused(_ on: Bool) {
+        lock.lock()
+        paused = on
+        lock.unlock()
     }
 
     /// Finalize. Idempotent, and terminal: the track cannot be reopened, so a

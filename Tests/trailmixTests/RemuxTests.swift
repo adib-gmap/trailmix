@@ -242,4 +242,144 @@ struct RemuxTests {
             #expect(try await AVURLAsset(url: legacy).loadTracks(withMediaType: .audio).count == 1)
         }
     }
+
+    // MARK: - Pauses
+
+    private func ms(_ value: Int) -> CMTime { CMTime(value: CMTimeValue(value), timescale: 1000) }
+    private func range(_ start: Int, _ end: Int) -> CMTimeRange {
+        CMTimeRange(start: ms(start), end: ms(end))
+    }
+
+    /// The complement that decides what survives the cut.
+    @Test("kept ranges are the video minus its pauses")
+    func keptRanges() {
+        let three = ms(3000)
+        #expect(Remux.kept(three, minus: []) == [range(0, 3000)], "no pauses, the whole video")
+        #expect(Remux.kept(three, minus: [range(1000, 2000)]) == [range(0, 1000), range(2000, 3000)])
+        #expect(Remux.kept(three, minus: [range(2000, 5000)]) == [range(0, 2000)], "a pause running past the end shortens the last range")
+        #expect(Remux.kept(three, minus: [range(0, 1000)]) == [range(1000, 3000)], "a pause at the very start")
+        #expect(
+            Remux.kept(three, minus: [range(2000, 2500), range(500, 1000)])
+                == [range(0, 500), range(1000, 2000), range(2500, 3000)],
+            "order of the pauses doesn't matter"
+        )
+        #expect(
+            Remux.kept(three, minus: [range(500, 1500), range(1000, 2000)]) == [range(0, 500), range(2000, 3000)],
+            "overlapping pauses merge"
+        )
+        #expect(Remux.kept(three, minus: [range(0, 3000)]).isEmpty, "nothing survives")
+        #expect(Remux.kept(.zero, minus: []).isEmpty, "no video, nothing kept")
+    }
+
+    /// `paused_ms` comes out of meta.json as ranges, and anything that isn't a
+    /// well-formed pair is dropped rather than guessed at.
+    @Test("paused ranges are read from meta.json")
+    func pausedRangesLookup() async throws {
+        try await SessionFixtures.inTemporaryDirectory { dir in
+            #expect(Remux.pausedRanges(in: dir).isEmpty, "no meta.json")
+            try writeMeta(to: dir, videoOffsetMs: 0)
+            #expect(Remux.pausedRanges(in: dir).isEmpty, "a session recorded before pausing existed")
+            try SessionFixtures.writeMeta(
+                to: dir, files: [:], pausedMs: [[1000, 2000], [2500], [3000, 2900], [-5, 100], [4000, 4500]]
+            )
+            #expect(Remux.pausedRanges(in: dir) == [range(1000, 2000), range(4000, 4500)])
+        }
+    }
+
+    /// The feature itself: a 3 s video with its middle second paused and a
+    /// 2 s gapless mix comes back as a 2 s video carrying that mix.
+    @Test("paused ranges are cut while the mix is swapped in")
+    func pausesAreCutDuringTheSwap() async throws {
+        try await SessionFixtures.inTemporaryDirectory { dir in
+            let video = dir.appendingPathComponent(SessionFiles.video)
+            try await SessionFixtures.writeVideo(to: video, seconds: 3)
+            try SessionFixtures.writeAudio(to: dir.appendingPathComponent(SessionFiles.mixedAudio), seconds: 2)
+            try SessionFixtures.writeMeta(
+                to: dir,
+                files: ["video": SessionFiles.video, "mixed": SessionFiles.mixedAudio],
+                offsets: ["mic": 0, "system": 0, "video": 0],
+                pausedMs: [[1000, 2000]]
+            )
+
+            await Remux.finalize(in: dir)
+
+            let after = AVURLAsset(url: video)
+            let duration = try await after.load(.duration).seconds
+            #expect(duration > 1.8 && duration < 2.2, "expected ~2s after cutting 1s from 3s, got \(duration)s")
+            #expect(try await after.loadTracks(withMediaType: .video).count == 1)
+            #expect(try await after.loadTracks(withMediaType: .audio).count == 1)
+            #expect(Remux.alreadySwapped(in: dir))
+            #expect(Remux.pausesRemoved(in: dir))
+            #expect(
+                !FileManager.default.fileExists(atPath: dir.appendingPathComponent("remux.tmp.mp4").path)
+            )
+        }
+    }
+
+    /// A video-only session has no mix to swap, and still has to lose its
+    /// paused stretch. The second pass is a no-op: the marker is what says so.
+    @Test("a video-only session with pauses is cut without a mix")
+    func videoOnlyPausesAreCut() async throws {
+        try await SessionFixtures.inTemporaryDirectory { dir in
+            let video = dir.appendingPathComponent(SessionFiles.video)
+            try await SessionFixtures.writeVideo(to: video, seconds: 3)
+            try SessionFixtures.writeMeta(
+                to: dir, files: ["video": SessionFiles.video], offsets: ["video": 0], pausedMs: [[2000, 3000]]
+            )
+            #expect(!Remux.pausesRemoved(in: dir))
+
+            await Remux.finalize(in: dir)
+
+            let duration = try await AVURLAsset(url: video).load(.duration).seconds
+            #expect(duration > 1.8 && duration < 2.2, "expected ~2s after cutting the last second, got \(duration)s")
+            #expect(Remux.pausesRemoved(in: dir))
+            #expect(!Remux.alreadySwapped(in: dir), "no mix was swapped in")
+
+            let size = (try? FileManager.default.attributesOfItem(atPath: video.path))?[.size] as? Int
+            await Remux.finalize(in: dir)
+            let again = (try? FileManager.default.attributesOfItem(atPath: video.path))?[.size] as? Int
+            #expect(again == size, "a finished cut was redone")
+        }
+    }
+
+    /// A video-only session that was never paused has nothing to do, and
+    /// `finalize` must leave it exactly alone rather than re-encode it.
+    @Test("a video-only session without pauses is left alone by finalize")
+    func videoOnlyWithoutPausesIsUntouched() async throws {
+        try await SessionFixtures.inTemporaryDirectory { dir in
+            let video = dir.appendingPathComponent(SessionFiles.video)
+            try await SessionFixtures.writeVideo(to: video, seconds: 1)
+            try SessionFixtures.writeMeta(to: dir, files: ["video": SessionFiles.video])
+            let before = (try? FileManager.default.attributesOfItem(atPath: video.path))?[.size] as? Int
+
+            await Remux.finalize(in: dir)
+
+            let after = (try? FileManager.default.attributesOfItem(atPath: video.path))?[.size] as? Int
+            #expect(after == before)
+            #expect(!Remux.pausesRemoved(in: dir))
+        }
+    }
+
+    /// A pause covering the whole video leaves nothing to keep. The original
+    /// stays as it was rather than being replaced by an empty file.
+    @Test("a pause covering the whole video is refused")
+    func pauseCoveringEverythingIsRefused() async throws {
+        try await SessionFixtures.inTemporaryDirectory { dir in
+            let video = dir.appendingPathComponent(SessionFiles.video)
+            try await SessionFixtures.writeVideo(to: video, seconds: 1)
+            try SessionFixtures.writeAudio(to: dir.appendingPathComponent(SessionFiles.mixedAudio), seconds: 1)
+            try SessionFixtures.writeMeta(
+                to: dir,
+                files: ["video": SessionFiles.video, "mixed": SessionFiles.mixedAudio],
+                pausedMs: [[0, 5000]]
+            )
+            let before = (try? FileManager.default.attributesOfItem(atPath: video.path))?[.size] as? Int
+
+            await Remux.finalize(in: dir)
+
+            let after = (try? FileManager.default.attributesOfItem(atPath: video.path))?[.size] as? Int
+            #expect(after == before, "the video was replaced with nothing")
+            #expect(!Remux.alreadySwapped(in: dir))
+        }
+    }
 }

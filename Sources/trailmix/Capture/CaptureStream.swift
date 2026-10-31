@@ -74,6 +74,29 @@ final class CaptureStream: NSObject, @unchecked Sendable {
     private var videoStartedAt: Date?
     private var stoppedUnexpectedly: String?
 
+    // Pause bookkeeping, all under `lock`.
+    //
+    // A pause does not stop the stream. SCRecordingOutput keeps writing
+    // mixed.mp4 and the audio writers drop what they are handed, so the audio
+    // tracks come out gapless while the video still holds the paused stretch.
+    // What is kept here is *where* in the video each pause falls, on the
+    // stream's own clock, so `Remux` can cut the same ranges out afterwards and
+    // put the two back on one timeline.
+    //
+    // The sample timestamps are the only clock the recording output and this
+    // code share. `firstPTS` is the earliest one the stream delivered, of any
+    // type, taken as the file's time zero. `lastPTS` plus how much host time
+    // has passed since it arrived gives "stream time now" at any moment, which
+    // is what a pause is stamped with: it has to work on a static screen with
+    // computer audio off, where no sample may arrive for seconds.
+    private var paused = false
+    private var firstPTS: CMTime?
+    private var firstAudioPTS: CMTime?
+    private var firstScreenPTS: CMTime?
+    private var lastPTS: CMTime = .invalid
+    private var lastPTSHost: CMTime = .invalid
+    private var pauses: [(start: CMTime, end: CMTime?)] = []
+
     /// Set when the recording output reports the file closed, either way.
     /// `stopCapture()` returns before the video is finalized, so without
     /// waiting on this the file may not exist yet when RecordingSession goes
@@ -106,6 +129,107 @@ final class CaptureStream: NSObject, @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         return stoppedUnexpectedly
+    }
+
+    // MARK: - Pause
+
+    var isPaused: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return paused
+    }
+
+    /// Stop writing audio and mark where in the video the gap begins. The
+    /// stream itself keeps running; see the note on the pause fields. A no-op
+    /// before `start()`, after `stop()`, or while already paused.
+    func pause() {
+        lock.lock()
+        guard stream != nil, !paused else { lock.unlock(); return }
+        paused = true
+        pauses.append((start: streamNowLocked(), end: nil))
+        lock.unlock()
+        systemWriter?.setPaused(true)
+        micWriter?.setPaused(true)
+    }
+
+    /// Resume writing audio and close the open gap. A no-op unless paused.
+    func resume() {
+        lock.lock()
+        guard paused else { lock.unlock(); return }
+        closePauseLocked()
+        lock.unlock()
+        systemWriter?.setPaused(false)
+        micWriter?.setPaused(false)
+    }
+
+    /// Every pause so far, as ranges in the video file's own time (zero at the
+    /// first sample the stream delivered). An open pause runs to now. This is
+    /// what `RecordingSession` writes to meta.json as `paused_ms` and what
+    /// `Remux` cuts out.
+    var pausedRanges: [CMTimeRange] {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let origin = firstPTS else { return [] }
+        let now = streamNowLocked()
+        return pauses.compactMap { pause in
+            let start = CMTimeMaximum(pause.start - origin, .zero)
+            let end = CMTimeMaximum((pause.end ?? now) - origin, start)
+            guard end > start else { return nil }
+            return CMTimeRange(start: start, end: end)
+        }
+    }
+
+    /// Lock held by the caller.
+    private func streamNowLocked() -> CMTime {
+        let host = CMClockGetTime(CMClockGetHostTimeClock())
+        guard lastPTS.isValid, lastPTSHost.isValid else { return host }
+        return lastPTS + (host - lastPTSHost)
+    }
+
+    /// Synchronous on purpose: `stop()` is async and NSLock can't be taken
+    /// from there, so it calls this instead.
+    private func endPauseForStop() {
+        lock.lock()
+        if paused { closePauseLocked() }
+        lock.unlock()
+    }
+
+    /// Lock held by the caller.
+    private func closePauseLocked() {
+        paused = false
+        if let last = pauses.indices.last, pauses[last].end == nil {
+            pauses[last].end = streamNowLocked()
+        }
+    }
+
+    /// Lock held by the caller. Called for every sample of every type.
+    private func noteTimestampLocked(_ pts: CMTime, of type: SCStreamOutputType) {
+        guard pts.isValid else { return }
+        lastPTS = pts
+        lastPTSHost = CMClockGetTime(CMClockGetHostTimeClock())
+        if firstPTS == nil || pts < firstPTS! { firstPTS = pts }
+        switch type {
+        case .audio, .microphone: if firstAudioPTS == nil { firstAudioPTS = pts }
+        case .screen: if firstScreenPTS == nil { firstScreenPTS = pts }
+        @unknown default: break
+        }
+    }
+
+    /// One log line with everything needed to check the pause cut points
+    /// against the finished video: which sample set the file's zero, how far
+    /// apart the two candidates were, and where the stream ended. Read it next
+    /// to the finalized duration of mixed.mp4 if a cut ever lands off.
+    private func logPauseCalibration() {
+        lock.lock()
+        let origin = firstPTS, audio = firstAudioPTS, screen = firstScreenPTS, end = lastPTS
+        let ranges = pauses
+        lock.unlock()
+        guard !ranges.isEmpty, let origin else { return }
+        let ms = { (t: CMTime?) -> String in t.map { String(Int(($0 - origin).seconds * 1000)) } ?? "none" }
+        Log.info(
+            "pause calibration · first audio \(ms(audio)) ms · first screen \(ms(screen)) ms "
+                + "· last sample \(ms(end)) ms · pauses \(ranges.map { "\(ms($0.start))-\(ms($0.end))" }.joined(separator: " "))"
+        )
     }
 
     func start() async throws {
@@ -194,6 +318,13 @@ final class CaptureStream: NSObject, @unchecked Sendable {
     func stop() async {
         guard let stream else { return }
         self.stream = nil
+
+        // A stop while paused ends the pause at the stop: the gap runs to the
+        // end of the video and gets cut like any other. Closed before the
+        // capture comes down so "stream time now" is still anchored to a
+        // sample that arrived moments ago.
+        endPauseForStop()
+        logPauseCalibration()
 
         // The mic engine is independent of the stream, so it comes down first
         // and on its own. Its writer is closed below with the others.
@@ -389,6 +520,15 @@ extension CaptureStream: SCStreamOutput {
         didOutputSampleBuffer sampleBuffer: CMSampleBuffer,
         of type: SCStreamOutputType
     ) {
+        // Every sample, whatever its type, advances the stream clock the
+        // pause ranges are stamped on. The writers do the dropping while
+        // paused; nothing here changes with the pause state.
+        lock.lock()
+        if sampleBuffer.isValid {
+            noteTimestampLocked(sampleBuffer.presentationTimeStamp, of: type)
+        }
+        lock.unlock()
+
         switch type {
         case .audio:
             systemWriter?.append(sampleBuffer)

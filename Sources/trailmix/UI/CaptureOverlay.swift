@@ -59,6 +59,15 @@ final class CaptureOverlay {
         target = .none
     }
 
+    /// Orange while paused, red while recording. The border stays up either
+    /// way: the capture is still pointed at the target, it is just not being
+    /// kept.
+    func setPaused(_ paused: Bool) {
+        guard let view = window?.contentView as? BorderView else { return }
+        view.color = paused ? .systemOrange : .systemRed
+        view.needsDisplay = true
+    }
+
     /// Reposition onto the target's current frame, or hide if it's gone.
     private func follow() {
         guard let window else { return }
@@ -149,6 +158,8 @@ final class CaptureOverlay {
 /// Strokes the border just inside the view, leaving the middle transparent so
 /// the window underneath stays fully visible and clickable.
 private final class BorderView: NSView {
+    var color: NSColor = .systemRed
+
     override func draw(_ dirtyRect: NSRect) {
         let width = CaptureOverlay.borderWidth
         let path = NSBezierPath(
@@ -157,7 +168,7 @@ private final class BorderView: NSView {
             yRadius: CaptureOverlay.cornerRadius
         )
         path.lineWidth = width
-        NSColor.systemRed.setStroke()
+        color.setStroke()
         path.stroke()
     }
 }

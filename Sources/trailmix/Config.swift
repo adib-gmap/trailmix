@@ -10,6 +10,7 @@ import Foundation
 ///       "echo_cancellation": true,
 ///       "max_recording_hours": 8,
 ///       "hotkey": "cmd+shift+7",
+///       "pause_hotkey": "cmd+shift+2",
 ///       "on_stop": "my-hook"
 ///     }
 ///
@@ -69,6 +70,11 @@ struct Config: Sendable {
     /// System-wide start/stop shortcut, e.g. "cmd+shift+7"; "none" disables
     /// it. See `GlobalHotkey.Combo.parse` for what is accepted.
     var hotkey: String
+    /// System-wide pause/resume shortcut, same syntax. Only acts while a
+    /// recording is running. ⇧⌘2 is the default because ⇧⌘3, 4 and 5 belong
+    /// to macOS screenshots and nothing on a stock Mac holds 2; Xcode's
+    /// "Devices" window does, which is why this is configurable.
+    var pauseHotkey: String
     var onStop: String?
 
     static let path = Paths.config
@@ -85,6 +91,7 @@ struct Config: Sendable {
         echoCancellation: true,
         maxRecordingHours: 8,
         hotkey: "cmd+shift+7",
+        pauseHotkey: "cmd+shift+2",
         onStop: nil
     )
 
@@ -142,6 +149,9 @@ struct Config: Sendable {
         }
         if let hotkey = json["hotkey"] as? String {
             config.hotkey = hotkey
+        }
+        if let hotkey = json["pause_hotkey"] as? String {
+            config.pauseHotkey = hotkey
         }
         if let cmd = json["on_stop"] as? String, !cmd.isEmpty {
             config.onStop = cmd

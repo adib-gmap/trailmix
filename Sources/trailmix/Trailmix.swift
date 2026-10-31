@@ -146,6 +146,8 @@ final class AppController {
     /// System-wide start/stop shortcut from `hotkey` in the config. Held so
     /// the registration lives as long as the app.
     private var hotkey: GlobalHotkey?
+    /// System-wide pause/resume shortcut from `pause_hotkey`. Same lifetime.
+    private var pauseHotkey: GlobalHotkey?
     private var ticker: Timer?
     private var busy = false
     private var terminating = false
@@ -160,12 +162,13 @@ final class AppController {
     /// awaits this first.
     private var lifecycle: Task<Void, Never>?
 
-    /// When the current recording stops itself, and whether the "stopping
-    /// soon" warning has already gone out for that deadline. Both are wall
-    /// clock rather than a countdown of ticks, so a machine that slept through
-    /// the deadline stops on the first tick after it wakes instead of resuming
-    /// a recording nobody is watching.
-    private var deadline: Date?
+    /// Whether the "stopping soon" warning has already gone out for the
+    /// current limit. The limit itself is not stored as a deadline: it is
+    /// worked out on every tick from the recorded time (the user's limit) and
+    /// the wall clock (the backstop), see `timeLeft`. Both read the clock
+    /// rather than counting ticks, so a machine that slept through its limit
+    /// stops on the first tick after it wakes instead of resuming a recording
+    /// nobody is watching.
     private var warned = false
 
     /// `warnings` are failed startup checks, shown in the menu. They don't
@@ -184,6 +187,21 @@ final class AppController {
             }
         } else if !["", "none", "off", "false"].contains(spec.lowercased()) {
             Log.warn("hotkey \"\(spec)\" not understood: use e.g. cmd+shift+7, or none")
+        }
+        menuBar.onPauseToggle = { [weak self] in self?.pauseToggle() }
+        let pauseSpec = Config.current.pauseHotkey
+        if let combo = GlobalHotkey.Combo.parse(pauseSpec) {
+            if combo == hotkey?.combo {
+                Log.warn("pause_hotkey \(combo.display) is the start/stop key; pause has no shortcut")
+            } else if let registered = GlobalHotkey(combo: combo, handler: { [weak self] in self?.pauseToggle() }) {
+                pauseHotkey = registered
+                menuBar.showPauseShortcut(combo)
+                Log.info("hotkey \(combo.display) pauses and resumes recording")
+            } else {
+                Log.warn("pause_hotkey \(combo.display) could not be registered; another app may hold it")
+            }
+        } else if !["", "none", "off", "false"].contains(pauseSpec.lowercased()) {
+            Log.warn("pause_hotkey \"\(pauseSpec)\" not understood: use e.g. cmd+shift+2, or none")
         }
         menuBar.onOpenFolder = { [weak self] in self?.openFolder() }
         menuBar.onChangeFolder = { [weak self] in self?.changeFolder() }
@@ -372,7 +390,7 @@ final class AppController {
         Log.info("● recording → \(newSession.dir.path)")
 
         overlay.show(for: sources.target)
-        computeDeadline()
+        warned = false
 
         // Installed in .common rather than scheduled into .default. A menu
         // that is open puts the run loop in event-tracking mode, where a
@@ -387,50 +405,72 @@ final class AppController {
         tick()
     }
 
-    /// Work out when the current recording has to stop: the limit the user
-    /// picked, the backstop, or whichever of the two comes first.
+    /// How long the current recording has left before it stops itself: the
+    /// user's limit, the backstop, or whichever of the two comes first. nil
+    /// with neither set.
     ///
-    /// Measured from `startedAt`, because a limit means total recording length.
-    /// Picking "1 hour" is a statement about how long the recording is, not
-    /// about how much longer it has left. Extending is a separate verb, and
+    /// The user's limit is measured against *recorded* time, because a limit
+    /// means total recording length. Picking "1 hour" is a statement about how
+    /// long the recording is, not about how much longer it has left, and a
+    /// pause doesn't shorten the recording. Extending is a separate verb, and
     /// the menu offers it as one.
-    private func computeDeadline() {
-        guard let session else {
-            deadline = nil
-            warned = false
-            return
-        }
-
-        var candidates: [Date] = []
+    ///
+    /// The backstop is wall clock on purpose. It guards against a recording
+    /// that was forgotten, and a recording forgotten while paused is still
+    /// forgotten: eight hours later it stops and finalizes whatever it has.
+    private func timeLeft(at now: Date) -> (left: TimeInterval, whole: TimeInterval)? {
+        guard let session else { return nil }
+        var candidates: [(left: TimeInterval, whole: TimeInterval)] = []
         if let limit = menuBar.limit {
-            candidates.append(session.startedAt.addingTimeInterval(limit.seconds))
+            candidates.append((limit.seconds - session.recordedElapsed(at: now), limit.seconds))
         }
-        let backstop = Config.current.maxRecordingHours
+        let backstop = Config.current.maxRecordingHours * 3600
         if backstop > 0 {
-            candidates.append(session.startedAt.addingTimeInterval(backstop * 3600))
+            candidates.append((backstop - now.timeIntervalSince(session.startedAt), backstop))
         }
-
-        let next = candidates.min()
-        // A deadline that moved deserves a fresh warning: extending past the
-        // five-minute mark and then getting no second warning is how you end
-        // up surprised twice by the same timer.
-        if next != deadline { warned = false }
-        deadline = next
+        return candidates.min { $0.left < $1.left }
     }
 
     private func limitChanged(to limit: RecordingLimit?) {
-        computeDeadline()
+        // A limit that moved deserves a fresh warning: extending past the
+        // five-minute mark and then getting no second warning is how you end
+        // up surprised twice by the same timer.
+        warned = false
         Log.info("recording timer → \(limit?.compact ?? "off")")
         // Show the new countdown now rather than up to a second from now; the
         // menu the user just clicked in is still on screen.
         if session != nil { tick() }
     }
 
+    /// Pause or resume the live recording. Synchronous: the stream keeps
+    /// running either way (see `CaptureStream.pause`), so there is nothing to
+    /// await and no `lifecycle` task to hold. The `busy` guard still applies:
+    /// a pause landing in the middle of a start or stop would be acting on a
+    /// session that is half there.
+    ///
+    /// Refused for the first two seconds of a recording so every track has
+    /// written its first buffer before any gap; the menu row is disabled for
+    /// the same window, and the hotkey just does nothing.
+    private func pauseToggle() {
+        guard let session, !busy, !terminating else { return }
+        let now = Date()
+        if session.isPaused {
+            session.resume()
+            overlay.setPaused(false)
+            Log.info("▶ resumed · \(RecordingLimit.clock(session.recordedElapsed(at: now))) recorded")
+        } else {
+            guard session.recordedElapsed(at: now) >= MenuBarController.pauseGrace else { return }
+            session.pause()
+            overlay.setPaused(true)
+            Log.info("❚❚ paused at \(RecordingLimit.clock(session.recordedElapsed(at: now)))")
+        }
+        tick()
+    }
+
     /// The timer ran out. Same shape as `handleUnexpectedStop` down to the
     /// synchronous `busy` claim, for the same reason.
-    private func autoStop() {
+    private func autoStop(limit ran: TimeInterval) {
         guard let session, !busy, !terminating else { return }
-        let ran = deadline.map { $0.timeIntervalSince(session.startedAt) } ?? 0
         let dir = session.dir
         Log.info("timer reached \(RecordingLimit.clock(ran)), stopping")
 
@@ -472,7 +512,6 @@ final class AppController {
         // reads as a hang, which is what it looked like.
         ticker?.invalidate()
         ticker = nil
-        deadline = nil
         warned = false
         overlay.hide()
         menuBar.showFinishing()
@@ -482,8 +521,11 @@ final class AppController {
         menuBar.setLimit(nil)
 
         await session.stop()
-        let elapsed = RecordingLimit.clock(Date().timeIntervalSince(session.startedAt))
-        Log.info("○ stopped · \(elapsed) · \(session.dir.path)")
+        let elapsed = RecordingLimit.clock(session.recordedElapsed())
+        let paused = session.pauseCount > 0
+            ? " · \(RecordingLimit.clock(session.pausedTotal())) paused in \(session.pauseCount) pause(s)"
+            : ""
+        Log.info("○ stopped · \(elapsed)\(paused) · \(session.dir.path)")
 
         let failed = session.failedTracks
         if !failed.isEmpty {
@@ -499,9 +541,11 @@ final class AppController {
         // Both off the main actor and after the menu is already back to idle.
         // The mix runs first so the playable file exists by the time the
         // "transcript ready" notification invites the user into the folder.
+        // `Remux.finalize` swaps the mix into the video and cuts out whatever
+        // was recorded while paused.
         Task { [transcription] in
             await Mixdown.run(in: dir)
-            await Remux.mixedAudioIntoVideo(in: dir)
+            await Remux.finalize(in: dir)
             await transcription.enqueue(dir)
         }
     }
@@ -529,26 +573,25 @@ final class AppController {
     private func tick() {
         guard let session else { return }
         let now = Date()
+        let recorded = session.recordedElapsed(at: now)
 
         // Only a limit the user set produces a countdown. The backstop is a
         // guard against forgetting, not a clock to watch.
-        let remaining = menuBar.limit.map {
-            session.startedAt.addingTimeInterval($0.seconds).timeIntervalSince(now)
-        }
+        let remaining = menuBar.limit.map { $0.seconds - recorded }
         menuBar.update(
             recording: true,
-            elapsed: now.timeIntervalSince(session.startedAt),
-            remaining: remaining
+            elapsed: recorded,
+            remaining: remaining,
+            paused: session.isPaused
         )
 
-        guard let deadline else { return }
-        if now >= deadline {
-            autoStop()
+        guard let status = timeLeft(at: now) else { return }
+        let (left, whole) = status
+        if left <= 0 {
+            autoStop(limit: whole)
             return
         }
 
-        let left = deadline.timeIntervalSince(now)
-        let whole = deadline.timeIntervalSince(session.startedAt)
         // Skipped when the limit is no longer than the warning itself, where
         // the warning would land at the moment the timer was set.
         guard !warned, left <= RecordingLimit.warningLead, whole > RecordingLimit.warningLead

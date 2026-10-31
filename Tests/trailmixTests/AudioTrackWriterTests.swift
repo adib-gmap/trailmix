@@ -270,6 +270,83 @@ struct AudioTrackWriterTests {
         }
     }
 
+    // MARK: - Pausing
+
+    /// A pause drops buffers instead of writing them, so the file holds only
+    /// the unpaused ones, back to back. That gap-free file is what keeps the
+    /// audio on the same clock as a video that has had the same stretch cut
+    /// out of it.
+    @Test("buffers while paused are dropped and writing resumes")
+    func pausedBuffersAreDropped() throws {
+        try inTemporaryDirectory { dir in
+            let url = dir.appendingPathComponent(SessionFiles.mic)
+            let writer = AudioTrackWriter(url: url, downmixToMono: true)
+            let buffer = try tone(channels: 1)
+
+            writer.append(buffer)
+            writer.append(buffer)
+            writer.setPaused(true)
+            writer.append(buffer)
+            writer.append(buffer)
+            writer.append(buffer)
+            writer.setPaused(false)
+            writer.append(buffer)
+            writer.close()
+
+            let decoded = try decode(url)
+            // Three buffers' worth, not six. AAC pads the tail by up to a
+            // packet, so this is a window rather than an exact count.
+            let written = Double(decoded.frames) / Double(Self.frames)
+            #expect(written > 2.7 && written < 3.6, "expected 3 buffers, decoded \(written)")
+            #expect(!decoded.isSilent)
+            #expect(!writer.hadFailure)
+        }
+    }
+
+    /// Pausing before the first buffer ever lands must not break the lazy
+    /// open: the file is created by the first buffer written after the
+    /// resume, and that buffer is the track's start.
+    @Test("a pause before the first buffer still opens the file on resume")
+    func pauseBeforeFirstBuffer() throws {
+        try inTemporaryDirectory { dir in
+            let url = dir.appendingPathComponent(SessionFiles.mic)
+            let writer = AudioTrackWriter(url: url, downmixToMono: true)
+            let buffer = try tone(channels: 1)
+
+            writer.setPaused(true)
+            writer.append(buffer)
+            #expect(!writer.wroteAnything, "a dropped buffer is not a start")
+            #expect(!FileManager.default.fileExists(atPath: url.path))
+            writer.setPaused(false)
+            writer.append(buffer)
+            writer.close()
+
+            #expect(writer.wroteAnything)
+            #expect(!(try decode(url)).isSilent)
+        }
+    }
+
+    /// `close()` is terminal; flipping the pause flag afterwards must not
+    /// reopen the track or erase it.
+    @Test("setPaused after close is harmless")
+    func setPausedAfterClose() throws {
+        try inTemporaryDirectory { dir in
+            let url = dir.appendingPathComponent(SessionFiles.mic)
+            let writer = AudioTrackWriter(url: url, downmixToMono: true)
+            let buffer = try tone(channels: 1)
+            writer.append(buffer)
+            writer.close()
+            let size = (try? FileManager.default.attributesOfItem(atPath: url.path))?[.size] as? Int
+
+            writer.setPaused(true)
+            writer.setPaused(false)
+            writer.append(buffer)
+
+            let after = (try? FileManager.default.attributesOfItem(atPath: url.path))?[.size] as? Int
+            #expect(after == size, "the closed track was touched")
+        }
+    }
+
     // MARK: - The track contract RecordingSession depends on
 
     /// `wroteAnything` is what decides whether a track is listed in meta.json.

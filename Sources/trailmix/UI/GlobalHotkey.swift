@@ -6,14 +6,21 @@ import Carbon
 /// Accessibility grant (unlike an `NSEvent` global monitor), and is the
 /// mechanism every menu-bar recorder uses for start/stop.
 ///
-/// The combination comes from `hotkey` in the config file, written like
-/// `"cmd+shift+5"`: any of `cmd`, `shift`, `alt` (or `option`), `ctrl`, then
-/// one key: a letter, a digit, `f1`…`f12` or `space`. `"none"` turns it off.
+/// The combination comes from `hotkey` (or `pause_hotkey`) in the config file,
+/// written like `"cmd+shift+5"`: any of `cmd`, `shift`, `alt` (or `option`),
+/// `ctrl`, then one key: a letter, a digit, `f1`…`f12` or `space`. `"none"`
+/// turns it off.
 ///
 /// A combination macOS already owns (⇧⌘3, ⇧⌘4, ⇧⌘5 for screenshots, ⌘Space
 /// for Spotlight) is taken by the system first: registration succeeds but the
 /// key never reaches us until that system shortcut is switched off in
 /// System Settings › Keyboard › Keyboard Shortcuts.
+///
+/// Several can be live at once (start/stop and pause/resume). Carbon hands a
+/// hot-key press to every installed handler until one claims it, so rather
+/// than one handler per instance the process installs a single one and
+/// dispatches on the id the event carries. Ids only have to be unique within
+/// the process.
 final class GlobalHotkey: @unchecked Sendable {
     struct Combo: Equatable, Sendable {
         let keyCode: UInt32
@@ -82,43 +89,77 @@ final class GlobalHotkey: @unchecked Sendable {
 
     let combo: Combo
     private let handler: @MainActor () -> Void
+    private let id: UInt32
     private var hotKeyRef: EventHotKeyRef?
-    private var handlerRef: EventHandlerRef?
+
+    /// The one Carbon handler for the process and the instances it dispatches
+    /// to. Weak, so an instance that is let go unregisters in `deinit` and
+    /// drops out of the table on the next lookup, without the table keeping it
+    /// alive. Main actor: Carbon delivers application-target events on the
+    /// main thread, and registration happens from `AppController.init`.
+    @MainActor private static var registry: [UInt32: Weak] = [:]
+    @MainActor private static var nextID: UInt32 = 1
+    @MainActor private static var handlerRef: EventHandlerRef?
+    private static let signature = OSType(0x54524D58) /* 'TRMX' */
+
+    private final class Weak {
+        weak var value: GlobalHotkey?
+        init(_ value: GlobalHotkey) { self.value = value }
+    }
 
     /// Registers immediately. nil when Carbon refuses, which in practice
     /// means another process already holds that exact combination.
+    @MainActor
     init?(combo: Combo, handler: @escaping @MainActor () -> Void) {
         self.combo = combo
         self.handler = handler
+        guard Self.installSharedHandler() else { return nil }
+        let id = Self.nextID
+        Self.nextID += 1
+        self.id = id
 
-        var eventType = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))
-        let status = InstallEventHandler(
-            GetApplicationEventTarget(),
-            { _, _, userData -> OSStatus in
-                guard let userData else { return noErr }
-                let hotkey = Unmanaged<GlobalHotkey>.fromOpaque(userData).takeUnretainedValue()
-                // Carbon delivers application-target events on the main thread.
-                MainActor.assumeIsolated { hotkey.handler() }
-                return noErr
-            },
-            1, &eventType,
-            Unmanaged.passUnretained(self).toOpaque(),
-            &handlerRef
-        )
-        guard status == noErr else { return nil }
-
-        // The signature and id only have to be unique within this process.
-        let id = EventHotKeyID(signature: OSType(0x54524D58) /* 'TRMX' */, id: 1)
-        guard RegisterEventHotKey(combo.keyCode, combo.carbonModifiers, id, GetApplicationEventTarget(), 0, &hotKeyRef) == noErr,
+        let hotKeyID = EventHotKeyID(signature: Self.signature, id: id)
+        guard RegisterEventHotKey(combo.keyCode, combo.carbonModifiers, hotKeyID, GetApplicationEventTarget(), 0, &hotKeyRef) == noErr,
             hotKeyRef != nil
-        else {
-            if let handlerRef { RemoveEventHandler(handlerRef) }
-            return nil
-        }
+        else { return nil }
+        Self.registry[id] = Weak(self)
     }
 
     deinit {
         if let hotKeyRef { UnregisterEventHotKey(hotKeyRef) }
-        if let handlerRef { RemoveEventHandler(handlerRef) }
+    }
+
+    /// Install the process-wide handler once. False if Carbon refuses, which
+    /// has not been seen but would mean no hotkey can ever fire.
+    @MainActor
+    private static func installSharedHandler() -> Bool {
+        if handlerRef != nil { return true }
+        var eventType = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))
+        let status = InstallEventHandler(
+            GetApplicationEventTarget(),
+            { _, event, _ -> OSStatus in
+                var hotKeyID = EventHotKeyID()
+                let read = GetEventParameter(
+                    event, EventParamName(kEventParamDirectObject), EventParamType(typeEventHotKeyID),
+                    nil, MemoryLayout<EventHotKeyID>.size, nil, &hotKeyID
+                )
+                guard read == noErr, hotKeyID.signature == GlobalHotkey.signature else {
+                    return OSStatus(eventNotHandledErr)
+                }
+                // Carbon delivers application-target events on the main thread.
+                MainActor.assumeIsolated {
+                    guard let hotkey = GlobalHotkey.registry[hotKeyID.id]?.value else {
+                        GlobalHotkey.registry[hotKeyID.id] = nil
+                        return
+                    }
+                    hotkey.handler()
+                }
+                return noErr
+            },
+            1, &eventType,
+            nil,
+            &handlerRef
+        )
+        return status == noErr
     }
 }

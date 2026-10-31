@@ -318,14 +318,12 @@ actor TranscriptionCoordinator {
     private func repairMixedFiles(in dir: URL) async {
         await Mixdown.run(in: dir)
 
-        // Only worth attempting if the mix actually got built; Mixdown declines
-        // a session with no audio, and Remux has nothing to swap in without it.
-        // A hard-killed session's video is unfinalized and unreadable, so this
+        // `Remux.finalize` decides what the video still needs: the mix swapped
+        // in if one got built, or just its pauses cut out if there is no mix
+        // to swap (a video-only session), each behind its own marker. A
+        // hard-killed session's video is unfinalized and unreadable, so it
         // warns and leaves it alone, which is the honest outcome.
-        let mixed = dir.appendingPathComponent(SessionFiles.mixedAudio)
-        guard FileManager.default.fileExists(atPath: mixed.path) else { return }
-        guard SessionFiles.video(in: dir) != nil, !Remux.alreadySwapped(in: dir) else { return }
-        await Remux.mixedAudioIntoVideo(in: dir)
+        await Remux.finalize(in: dir)
     }
 
     private func transcribe(_ dir: URL) async throws {

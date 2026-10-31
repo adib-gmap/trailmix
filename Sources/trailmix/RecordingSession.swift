@@ -19,6 +19,10 @@ final class RecordingSession {
     let sources: CaptureStream.Sources
 
     private let stream: CaptureStream
+    /// Wall-clock side of the pauses: the elapsed counter, the limit and
+    /// `duration_seconds` all read recorded time from here. The stream keeps
+    /// the other side, where each pause falls in the video.
+    private var ledger = PauseLedger()
 
     private static let folderFormat: DateFormatter = {
         let f = DateFormatter()
@@ -53,8 +57,40 @@ final class RecordingSession {
         try await stream.start()
     }
 
+    // MARK: - Pause
+
+    var isPaused: Bool { ledger.isPaused }
+    var pauseCount: Int { ledger.count }
+
+    /// Stop writing audio and mark the gap in the video. Capture keeps
+    /// running: see `CaptureStream.pause`. Nothing to await.
+    func pause() {
+        guard !ledger.isPaused else { return }
+        ledger.pause(at: Date())
+        stream.pause()
+    }
+
+    func resume() {
+        guard ledger.isPaused else { return }
+        ledger.resume(at: Date())
+        stream.resume()
+    }
+
+    /// How much has actually been recorded: wall clock minus the pauses. The
+    /// number the menu counts, the limit measures, and meta.json reports.
+    func recordedElapsed(at now: Date = Date()) -> TimeInterval {
+        ledger.recorded(since: startedAt, at: now)
+    }
+
+    func pausedTotal(at now: Date = Date()) -> TimeInterval {
+        ledger.pausedTotal(at: now)
+    }
+
     /// Stop capture and write meta.json.
     func stop() async {
+        // A stop while paused ends the pause here, before the stream comes
+        // down, so the paused total doesn't absorb however long the stop takes.
+        if ledger.isPaused { ledger.resume(at: Date()) }
         await stream.stop()
 
         let ended = Date()
@@ -92,10 +128,15 @@ final class RecordingSession {
         let earliest = starts.values.min() ?? startedAt
         let offsets = starts.mapValues { Int($0.timeIntervalSince(earliest) * 1000) }
 
+        // `duration_seconds` is recorded time: with no pauses that is
+        // `ended - started`, exactly what it always was. With pauses it is
+        // what the files actually hold, which is the number anyone opening the
+        // folder wants, and the wall-clock span is still there in the two
+        // timestamps.
         var meta: [String: Any] = [
             "started": iso.string(from: startedAt),
             "ended": iso.string(from: ended),
-            "duration_seconds": Int(ended.timeIntervalSince(startedAt)),
+            "duration_seconds": Int(ledger.recorded(since: startedAt, at: ended)),
             "files": files,
             "start_offset_ms": offsets,
             "sources": [
@@ -106,6 +147,16 @@ final class RecordingSession {
         ]
         if let reason = stream.unexpectedStopReason {
             meta["stopped_unexpectedly"] = reason
+        }
+        // Only when there were pauses, so an unpaused session's meta.json is
+        // what it was before pausing existed. `paused_ms` is in the video
+        // file's own time and is what `Remux` cuts out; the audio tracks were
+        // never written during these ranges, so they need nothing.
+        if ledger.count > 0 {
+            meta["paused_seconds"] = Int(ledger.pausedTotal(at: ended))
+            meta["paused_ms"] = stream.pausedRanges.map { range in
+                [Int((range.start.seconds * 1000).rounded()), Int((range.end.seconds * 1000).rounded())]
+            }
         }
 
         // Atomic, like every other write to this file. Its mere presence is

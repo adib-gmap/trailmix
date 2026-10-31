@@ -19,8 +19,10 @@ import Testing
 enum SessionFixtures {
 
     private static let fps: Int32 = 30
-    private static let width = 160
-    private static let height = 120
+    // Multiples of 16 and comfortably above the hardware encoders' minimum,
+    // so the fixture encodes on every Mac the tests run on.
+    private static let width = 320
+    private static let height = 240
 
     static func inTemporaryDirectory(_ body: (URL) async throws -> Void) async throws {
         let dir = URL(fileURLWithPath: NSTemporaryDirectory())
@@ -130,9 +132,11 @@ enum SessionFixtures {
     static func writeMeta(
         to dir: URL,
         files: [String: String],
-        offsets: [String: Int] = [:]
+        offsets: [String: Int] = [:],
+        pausedMs: [[Int]]? = nil
     ) throws {
-        let meta: [String: Any] = ["files": files, "start_offset_ms": offsets]
+        var meta: [String: Any] = ["files": files, "start_offset_ms": offsets]
+        if let pausedMs { meta["paused_ms"] = pausedMs }
         try JSONSerialization.data(withJSONObject: meta)
             .write(to: dir.appendingPathComponent(SessionFiles.meta))
     }

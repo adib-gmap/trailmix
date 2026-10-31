@@ -12,6 +12,7 @@ final class MenuBarController: NSObject {
     private let stateLabel: NSMenuItem
     private let transcriptionLabel: NSMenuItem
     private let toggleItem: NSMenuItem
+    private let pauseItem: NSMenuItem
     private var warningItems: [NSMenuItem] = []
 
     private let computerAudioItem: NSMenuItem
@@ -30,6 +31,12 @@ final class MenuBarController: NSObject {
     private var content = ShareableContent()
     private var refreshing = false
     private var isRecording = false
+    private var isPaused = false
+
+    /// How far into a recording the pause row comes alive. Every track needs
+    /// its first buffer on disk before any gap, or the start offsets that
+    /// align the tracks would be measured against a pause.
+    static let pauseGrace: TimeInterval = 2
 
     private(set) var sources = CaptureStream.Sources(
         computerAudio: true,
@@ -62,6 +69,8 @@ final class MenuBarController: NSObject {
     private var elapsed: TimeInterval = 0
 
     var onToggle: (() -> Void)?
+    /// Pause or resume, whichever the row currently says.
+    var onPauseToggle: (() -> Void)?
     var onOpenFolder: (() -> Void)?
     /// The user picked a new recordings root.
     var onChangeFolder: (() -> Void)?
@@ -142,6 +151,17 @@ final class MenuBarController: NSObject {
         )
         menu.addItem(toggleItem)
 
+        // Only there while a recording runs. A pause row in an idle menu is
+        // one more thing to read past, and a disabled one implies a state the
+        // app isn't in.
+        pauseItem = NSMenuItem(
+            title: "Pause recording",
+            action: #selector(pauseClicked),
+            keyEquivalent: ""
+        )
+        pauseItem.isHidden = true
+        menu.addItem(pauseItem)
+
         // Directly under the toggle rather than up with the sources: this is a
         // property of the recording, not another thing being recorded. Unlike
         // the source rows it stays live during a capture. See applySources().
@@ -213,7 +233,7 @@ final class MenuBarController: NSObject {
         super.init()
 
         for item in [
-            toggleItem, openFolder, changeFolderItem, about, quit,
+            toggleItem, pauseItem, openFolder, changeFolderItem, about, quit,
             computerAudioItem, microphoneItem, modelItem,
         ] {
             item.target = self
@@ -256,14 +276,23 @@ final class MenuBarController: NSObject {
     /// backstop deliberately doesn't produce a countdown: it is a guard against
     /// forgetting, and a menu bar ticking down from 8:00 on every
     /// recording would turn it into a thing to watch.
-    func update(recording: Bool, elapsed: TimeInterval?, remaining: TimeInterval? = nil) {
+    ///
+    /// `elapsed` is recorded time, which stands still while `paused`. A paused
+    /// recording is still a recording as far as every lock in this menu is
+    /// concerned: the stream is live and its configuration can't change.
+    func update(
+        recording: Bool, elapsed: TimeInterval?, remaining: TimeInterval? = nil, paused: Bool = false
+    ) {
         let transitioned = isRecording != recording
         isRecording = recording
+        isPaused = recording && paused
         finishing = false
         self.elapsed = elapsed ?? 0
 
         if recording {
-            var line = "● Recording · \(RecordingLimit.clock(elapsed ?? 0))"
+            var line = isPaused
+                ? "❚❚ Paused · \(RecordingLimit.clock(elapsed ?? 0))"
+                : "● Recording · \(RecordingLimit.clock(elapsed ?? 0))"
             if let remaining {
                 line += " · \(RecordingLimit.clock(remaining)) left"
             }
@@ -274,13 +303,21 @@ final class MenuBarController: NSObject {
 
         toggleItem.title = recording ? "Stop recording" : "Start recording"
         toggleItem.isEnabled = true
+        pauseItem.isHidden = !recording
+        pauseItem.title = isPaused ? "Resume recording" : "Pause recording"
+        pauseItem.isEnabled = recording && (isPaused || self.elapsed >= Self.pauseGrace)
         statusItem.button?.image = recording ? Self.recordingImage : Self.idleImage
-        statusItem.button?.contentTintColor = recording ? .systemRed : nil
+        // Orange, not red, while paused: same badge (a session is open), a
+        // colour that says it isn't being kept.
+        statusItem.button?.contentTintColor = recording ? (isPaused ? .systemOrange : .systemRed) : nil
         // The menu bar carries the countdown, not the elapsed time. Elapsed is
         // a number you look up when you wonder; remaining is a number you want
         // to catch out of the corner of your eye, which is the only thing the
-        // menu bar is good for.
-        setButtonTitle(recording ? remaining.map { RecordingLimit.hoursMinutes($0) } : nil)
+        // menu bar is good for. Paused takes the slot: a countdown that isn't
+        // counting is the wrong thing to glance at.
+        setButtonTitle(
+            isPaused ? "Paused" : (recording ? remaining.map { RecordingLimit.hoursMinutes($0) } : nil)
+        )
 
         applySources()
         // A full rebuild only when starting or stopping, since that is when the
@@ -313,10 +350,12 @@ final class MenuBarController: NSObject {
     /// gap has to look like progress rather than a frozen menu.
     func showFinishing() {
         isRecording = false
+        isPaused = false
         finishing = true
         elapsed = 0
         stateLabel.title = "Finishing…"
         toggleItem.title = "Finishing…"
+        pauseItem.isHidden = true
         statusItem.button?.image = Self.idleImage
         statusItem.button?.contentTintColor = nil
         setButtonTitle(nil)
@@ -926,7 +965,14 @@ final class MenuBarController: NSObject {
         toggleItem.keyEquivalentModifierMask = combo.cocoaModifiers
     }
 
+    /// Show the registered pause/resume shortcut next to its row.
+    func showPauseShortcut(_ combo: GlobalHotkey.Combo) {
+        pauseItem.keyEquivalent = combo.keyEquivalent
+        pauseItem.keyEquivalentModifierMask = combo.cocoaModifiers
+    }
+
     @objc private func toggleClicked() { onToggle?() }
+    @objc private func pauseClicked() { onPauseToggle?() }
     @objc private func openFolderClicked() { onOpenFolder?() }
     @objc private func changeFolderClicked() { onChangeFolder?() }
     @objc private func aboutClicked() { AboutPanel.show() }
