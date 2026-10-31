@@ -325,6 +325,9 @@ final class AppController {
         // on its way out and `shutdown()` is already awaiting whatever was in
         // flight, so a click landing now would start a recording nothing will
         // ever stop.
+        // While the display picker is up, the shortcut or the menu row means
+        // "never mind": the picker is dismissed and startSession() returns.
+        if DisplayPicker.cancelActive() { return }
         guard !busy, !terminating else { return }
         busy = true
         lifecycle = Task { @MainActor in
@@ -338,7 +341,7 @@ final class AppController {
     }
 
     private func startSession() async {
-        let sources = menuBar.sources
+        var sources = menuBar.sources
         guard !sources.isEmpty else { return }
 
         // Read the grants again rather than trusting the menu's snapshot: one
@@ -351,6 +354,21 @@ final class AppController {
             Log.warn("not recording · \(Permissions.blockedReason(missing) ?? "")")
             explainBlockedRecording(missing)
             return
+        }
+
+        // Which screen? With more than one attached, ask every time the way
+        // the system recorder does, since the menu's saved choice is whatever
+        // was picked last and the wrong one is only obvious once the recording
+        // is over. The pick is persisted like a click on the Capture submenu.
+        if case .display(let saved) = sources.target, NSScreen.screens.count > 1 {
+            guard let picked = await DisplayPicker.pick(current: saved) else {
+                Log.info("recording cancelled at the screen picker")
+                return
+            }
+            if picked != saved {
+                menuBar.select(display: picked)
+                sources.target = .display(picked)
+            }
         }
 
         let newSession: RecordingSession

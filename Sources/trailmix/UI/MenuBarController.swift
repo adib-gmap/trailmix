@@ -306,7 +306,6 @@ final class MenuBarController: NSObject {
         pauseItem.isHidden = !recording
         pauseItem.title = isPaused ? "Resume recording" : "Pause recording"
         pauseItem.isEnabled = recording && (isPaused || self.elapsed >= Self.pauseGrace)
-        statusItem.button?.image = recording ? Self.recordingImage : Self.idleImage
         // Orange, not red, while paused: same badge (a session is open), a
         // colour that says it isn't being kept.
         statusItem.button?.contentTintColor = recording ? (isPaused ? .systemOrange : .systemRed) : nil
@@ -316,7 +315,9 @@ final class MenuBarController: NSObject {
         // menu bar is good for. Paused takes the slot: a countdown that isn't
         // counting is the wrong thing to glance at.
         setButtonTitle(
-            isPaused ? "Paused" : (recording ? remaining.map { RecordingLimit.hoursMinutes($0) } : nil)
+            isPaused ? "Paused" : (recording ? remaining.map { RecordingLimit.hoursMinutes($0) } : nil),
+            color: isPaused ? .systemOrange : (recording ? .systemRed : nil),
+            badge: recording ? (isPaused ? Self.pausedImage : Self.recordingImage) : Self.idleImage
         )
 
         applySources()
@@ -336,13 +337,45 @@ final class MenuBarController: NSObject {
         stateLabel.title = Permissions.blockedReason(blockers) ?? "Idle"
     }
 
-    private func setButtonTitle(_ text: String?) {
+    private var buttonTitle: (text: String, color: NSColor?) = ("", nil)
+
+    /// The icon and the text beside it. A coloured text (orange "Paused", red
+    /// countdown) is rendered into one image with the badge: the status bar
+    /// repaints a button title in its own colour whatever the attributed
+    /// string says, the same way it ignores `contentTintColor` on a template
+    /// image, so colour only survives when it is pixels.
+    private func setButtonTitle(_ text: String?, color: NSColor? = nil, badge: NSImage) {
         guard let button = statusItem.button else { return }
         let new = text ?? ""
         // Writing the same string still triggers a layout pass, and this runs
         // once a second.
-        guard button.title != new else { return }
-        button.title = new
+        guard buttonTitle.text != new || buttonTitle.color != color || button.image !== badge else { return }
+        buttonTitle = (new, color)
+        if let color, !new.isEmpty {
+            button.image = Self.badge(badge, labelled: new, in: color, font: button.font)
+            button.title = ""
+        } else {
+            button.image = badge
+            button.title = new
+        }
+    }
+
+    /// `badge` on the left, `text` beside it, both in `color`.
+    private static func badge(_ badge: NSImage, labelled text: String, in color: NSColor, font: NSFont?) -> NSImage {
+        let label = NSAttributedString(string: text, attributes: [
+            .font: font ?? NSFont.menuBarFont(ofSize: 0),
+            .foregroundColor: color,
+        ])
+        let gap: CGFloat = 5
+        let size = NSSize(width: badge.size.width + gap + ceil(label.size().width), height: badge.size.height)
+        let image = NSImage(size: size, flipped: false) { _ in
+            badge.draw(in: NSRect(origin: .zero, size: badge.size))
+            let textSize = label.size()
+            label.draw(at: NSPoint(x: badge.size.width + gap, y: (size.height - textSize.height) / 2))
+            return true
+        }
+        image.isTemplate = false
+        return image
     }
 
     /// Capture has stopped but the files aren't closed yet. The video needs a
@@ -356,9 +389,8 @@ final class MenuBarController: NSObject {
         stateLabel.title = "Finishing…"
         toggleItem.title = "Finishing…"
         pauseItem.isHidden = true
-        statusItem.button?.image = Self.idleImage
         statusItem.button?.contentTintColor = nil
-        setButtonTitle(nil)
+        setButtonTitle(nil, badge: Self.idleImage)
         applySources()
         // applySources() re-enables the toggle whenever sources are non-empty;
         // starting a new recording before this one has closed its files is
@@ -425,6 +457,16 @@ final class MenuBarController: NSObject {
 
     @objc private func captureNoneClicked() {
         sources.target = .none
+        rebuildCaptureMenu()
+        selectionChanged()
+    }
+
+    /// The screen picker's choice at the start of a recording. Treated like
+    /// a click on the Capture submenu: persisted, and the menu agrees with
+    /// what is being recorded.
+    func select(display id: CGDirectDisplayID) {
+        guard sources.target != .display(id) else { return }
+        sources.target = .display(id)
         rebuildCaptureMenu()
         selectionChanged()
     }
@@ -893,8 +935,9 @@ final class MenuBarController: NSObject {
     /// Menu-bar status icons are nominally 18pt tall; 16 leaves breathing room.
     private static let iconSide: CGFloat = 16
 
-    private static let idleImage = statusImage(recording: false)
-    private static let recordingImage = statusImage(recording: true)
+    private static let idleImage = statusImage(fill: nil)
+    private static let recordingImage = statusImage(fill: .systemRed)
+    private static let pausedImage = statusImage(fill: .systemOrange)
 
     /// Two states, two silhouettes.
     ///
@@ -908,9 +951,13 @@ final class MenuBarController: NSObject {
     /// blob, which registers without being looked at. The red tint stays on top
     /// of it, so the two cues agree rather than compete.
     ///
-    /// Still a template image: macOS recolours it for light and dark menu bars,
-    /// and `contentTintColor` is what makes the recording one red.
-    private static func statusImage(recording: Bool) -> NSImage {
+    /// The idle ridge is a template image, so macOS recolours it for light and
+    /// dark menu bars. The recording slab carries its own colour (`fill`):
+    /// `contentTintColor` never reached a template image in the status bar on
+    /// macOS 15, and the badge came out black, which is just "busy", not
+    /// "live". The ridge is punched out of the slab, so it shows the menu bar
+    /// through it in either appearance.
+    private static func statusImage(fill: NSColor?) -> NSImage {
         let side = iconSide
         let image = NSImage(size: NSSize(width: side, height: side), flipped: true) { _ in
             let scale = side / 24
@@ -921,10 +968,11 @@ final class MenuBarController: NSObject {
             }
             mountain.close()
 
-            guard recording else {
+            guard let fill else {
                 mountain.fill()
                 return true
             }
+            fill.setFill()
 
             // The slab stops exactly at the ridge's base line (y 19.6), not at
             // the bottom of the square. Any lower and a thin bar of ink is left
@@ -955,7 +1003,7 @@ final class MenuBarController: NSObject {
             }
             return true
         }
-        image.isTemplate = true
+        image.isTemplate = fill == nil
         return image
     }
 
