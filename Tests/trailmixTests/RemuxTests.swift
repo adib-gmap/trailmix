@@ -259,6 +259,10 @@ struct RemuxTests {
         #expect(Remux.kept(three, minus: [range(2000, 5000)]) == [range(0, 2000)], "a pause running past the end shortens the last range")
         #expect(Remux.kept(three, minus: [range(0, 1000)]) == [range(1000, 3000)], "a pause at the very start")
         #expect(
+            Remux.kept(three, minus: [CMTimeRange(start: ms(2000), end: .positiveInfinity)]) == [range(0, 2000)],
+            "a pause the recording was stopped in reaches the end of the file"
+        )
+        #expect(
             Remux.kept(three, minus: [range(2000, 2500), range(500, 1000)])
                 == [range(0, 500), range(1000, 2000), range(2500, 3000)],
             "order of the pauses doesn't matter"
@@ -280,9 +284,14 @@ struct RemuxTests {
             try writeMeta(to: dir, videoOffsetMs: 0)
             #expect(Remux.pausedRanges(in: dir).isEmpty, "a session recorded before pausing existed")
             try SessionFixtures.writeMeta(
-                to: dir, files: [:], pausedMs: [[1000, 2000], [2500], [3000, 2900], [-5, 100], [4000, 4500]]
+                to: dir, files: [:],
+                pausedMs: [[1000, 2000], [2500], [3000, 2900], [-5, 100], [4000, 4500], [5000, -1]]
             )
-            #expect(Remux.pausedRanges(in: dir) == [range(1000, 2000), range(4000, 4500)])
+            #expect(
+                Remux.pausedRanges(in: dir)
+                    == [range(1000, 2000), range(4000, 4500), CMTimeRange(start: ms(5000), end: .positiveInfinity)],
+                "-1 is a pause that ran into the stop and reaches the end"
+            )
         }
     }
 
@@ -339,6 +348,26 @@ struct RemuxTests {
             await Remux.finalize(in: dir)
             let again = (try? FileManager.default.attributesOfItem(atPath: video.path))?[.size] as? Int
             #expect(again == size, "a finished cut was redone")
+        }
+    }
+
+    /// Stopping while paused: the stream can't know how far the recorder will
+    /// write after the last sample it saw, so the pause is open-ended (-1) and
+    /// the cut has to reach the real end of the file, not the last sample.
+    @Test("a session stopped while paused is cut to the end of the file")
+    func stoppedWhilePausedCutsToTheEnd() async throws {
+        try await SessionFixtures.inTemporaryDirectory { dir in
+            let video = dir.appendingPathComponent(SessionFiles.video)
+            try await SessionFixtures.writeVideo(to: video, seconds: 3)
+            try SessionFixtures.writeMeta(
+                to: dir, files: ["video": SessionFiles.video], offsets: ["video": 0], pausedMs: [[2000, -1]]
+            )
+
+            await Remux.finalize(in: dir)
+
+            let duration = try await AVURLAsset(url: video).load(.duration).seconds
+            #expect(duration > 1.8 && duration < 2.2, "expected ~2s with everything after the pause gone, got \(duration)s")
+            #expect(Remux.pausesRemoved(in: dir))
         }
     }
 

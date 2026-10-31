@@ -180,8 +180,10 @@ enum Remux {
     }
 
     /// The paused stretches, in the video file's time, from `paused_ms`.
-    /// Absent (every session recorded before pausing existed) means none.
-    /// Anything malformed is dropped rather than guessed at.
+    /// Absent (every session recorded before pausing existed) means none. An
+    /// end of -1 is a pause the recording was stopped in: it runs to the end
+    /// of the file, however far the recorder wrote past the last sample the
+    /// stream saw. Anything malformed is dropped rather than guessed at.
     static func pausedRanges(in dir: URL) -> [CMTimeRange] {
         guard
             let data = try? Data(contentsOf: dir.appendingPathComponent(SessionFiles.meta)),
@@ -189,10 +191,10 @@ enum Remux {
             let pairs = json["paused_ms"] as? [[Int]]
         else { return [] }
         return pairs.compactMap { pair in
-            guard pair.count == 2, pair[0] >= 0, pair[1] > pair[0] else { return nil }
+            guard pair.count == 2, pair[0] >= 0, pair[1] > pair[0] || pair[1] == -1 else { return nil }
             return CMTimeRange(
                 start: CMTime(value: CMTimeValue(pair[0]), timescale: 1000),
-                end: CMTime(value: CMTimeValue(pair[1]), timescale: 1000)
+                end: pair[1] == -1 ? .positiveInfinity : CMTime(value: CMTimeValue(pair[1]), timescale: 1000)
             )
         }
     }
@@ -205,6 +207,8 @@ enum Remux {
         guard duration > .zero else { return [] }
         let whole = CMTimeRange(start: .zero, duration: duration)
         let cuts = pauses
+            // An open-ended pause (stopped while paused) reaches the end.
+            .map { CMTimeRange(start: $0.start, end: CMTimeMinimum($0.end, duration)) }
             .map { $0.intersection(whole) }
             .filter { $0.duration > .zero }
             .sorted { $0.start < $1.start }

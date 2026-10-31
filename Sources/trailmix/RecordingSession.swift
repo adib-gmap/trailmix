@@ -151,11 +151,15 @@ final class RecordingSession {
         // Only when there were pauses, so an unpaused session's meta.json is
         // what it was before pausing existed. `paused_ms` is in the video
         // file's own time and is what `Remux` cuts out; the audio tracks were
-        // never written during these ranges, so they need nothing.
+        // never written during these ranges, so they need nothing. An end of
+        // -1 is a pause that ran into the stop: it reaches the end of the file.
         if ledger.count > 0 {
             meta["paused_seconds"] = Int(ledger.pausedTotal(at: ended))
             meta["paused_ms"] = stream.pausedRanges.map { range in
-                [Int((range.start.seconds * 1000).rounded()), Int((range.end.seconds * 1000).rounded())]
+                [
+                    Int((range.start.seconds * 1000).rounded()),
+                    range.end.isPositiveInfinity ? -1 : Int((range.end.seconds * 1000).rounded()),
+                ]
             }
         }
 

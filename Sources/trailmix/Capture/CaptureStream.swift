@@ -96,6 +96,10 @@ final class CaptureStream: NSObject, @unchecked Sendable {
     private var lastPTS: CMTime = .invalid
     private var lastPTSHost: CMTime = .invalid
     private var pauses: [(start: CMTime, end: CMTime?)] = []
+    /// The last pause ran into `stop()`. Its cut must reach the end of the
+    /// file, not the last sample this delegate saw: the recorder writes on
+    /// for roughly half a second after that while the capture comes down.
+    private var pausedAtStop = false
 
     /// Set when the recording output reports the file closed, either way.
     /// `stopCapture()` returns before the video is finalized, so without
@@ -163,16 +167,19 @@ final class CaptureStream: NSObject, @unchecked Sendable {
     }
 
     /// Every pause so far, as ranges in the video file's own time (zero at the
-    /// first sample the stream delivered). An open pause runs to now. This is
-    /// what `RecordingSession` writes to meta.json as `paused_ms` and what
-    /// `Remux` cuts out.
+    /// first sample the stream delivered). An open pause runs to now; a pause
+    /// that ran into `stop()` runs to the end of the file (`end` is
+    /// `+infinity`). This is what `RecordingSession` writes to meta.json as
+    /// `paused_ms` and what `Remux` cuts out.
     var pausedRanges: [CMTimeRange] {
         lock.lock()
         defer { lock.unlock() }
         guard let origin = firstPTS else { return [] }
         let now = streamNowLocked()
-        return pauses.compactMap { pause in
+        let openEnded = pausedAtStop ? pauses.indices.last : nil
+        return pauses.enumerated().compactMap { index, pause in
             let start = CMTimeMaximum(pause.start - origin, .zero)
+            if index == openEnded { return CMTimeRange(start: start, end: .positiveInfinity) }
             let end = CMTimeMaximum((pause.end ?? now) - origin, start)
             guard end > start else { return nil }
             return CMTimeRange(start: start, end: end)
@@ -190,7 +197,10 @@ final class CaptureStream: NSObject, @unchecked Sendable {
     /// from there, so it calls this instead.
     private func endPauseForStop() {
         lock.lock()
-        if paused { closePauseLocked() }
+        if paused {
+            pausedAtStop = true
+            closePauseLocked()
+        }
         lock.unlock()
     }
 
