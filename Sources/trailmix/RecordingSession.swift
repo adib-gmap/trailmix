@@ -24,23 +24,20 @@ final class RecordingSession {
     /// the other side, where each pause falls in the video.
     private var ledger = PauseLedger()
 
-    private static let folderFormat: DateFormatter = {
-        let f = DateFormatter()
-        f.dateFormat = "yyyy.MM.dd-HHmm"
-        f.locale = Locale(identifier: "en_US_POSIX")
-        return f
-    }()
-
-    /// Create the session folder under `root` (yyyy.MM.dd-HHmm, suffixed on
-    /// collision) without starting capture yet.
-    init(root: URL, sources: CaptureStream.Sources, capture: Config.Capture) throws {
-        let base = Self.folderFormat.string(from: startedAt)
-        var candidate = root.appendingPathComponent(base, isDirectory: true)
-        var n = 2
-        while FileManager.default.fileExists(atPath: candidate.path) {
-            candidate = root.appendingPathComponent("\(base)-\(n)", isDirectory: true)
-            n += 1
-        }
+    /// Create the session folder under `root` without starting capture yet.
+    /// `folder` is what the start prompt named (see `SessionNaming`), with
+    /// its intermediate folders created on the way; nil is the timestamp
+    /// name every session had before the prompt. Either way the last
+    /// component is suffixed `-2`, `-3` on collision.
+    init(
+        root: URL,
+        folder: SessionNaming.Folder? = nil,
+        sources: CaptureStream.Sources,
+        capture: Config.Capture
+    ) throws {
+        let folder = folder ?? SessionNaming.timestampFolder(at: startedAt)
+        let parent = SessionNaming.Folder(components: Array(folder.components.dropLast())).url(under: root)
+        let candidate = SessionNaming.uniqueDirectory(parent: parent, base: folder.leaf)
         try FileManager.default.createDirectory(at: candidate, withIntermediateDirectories: true)
         dir = candidate
         self.sources = sources

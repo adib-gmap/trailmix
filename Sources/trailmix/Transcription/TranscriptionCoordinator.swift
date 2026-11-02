@@ -66,8 +66,11 @@ actor TranscriptionCoordinator {
     }
 
     /// Scan the recordings root for unfinished work: anything that either
-    /// stopped cleanly (meta.json) or still has media on disk. Folder names
-    /// sort chronologically, so oldest-first is a name sort.
+    /// stopped cleanly (meta.json) or still has media on disk. Sessions can
+    /// sit four levels down since the naming prompt (training recordings go
+    /// under the SOP library's drafts folder) and are named by description
+    /// rather than timestamp, so `SessionScan` walks a bounded tree and
+    /// orders by creation date; a name sort would no longer be oldest-first.
     ///
     /// Two separate questions get asked of every session it finds, and they are
     /// deliberately not the same question. transcript.json decides whether the
@@ -89,37 +92,26 @@ actor TranscriptionCoordinator {
     /// recording started while this is repairing an older session is therefore
     /// not in the list and cannot be touched by it.
     func resumePending(root: URL) async {
-        guard let entries = try? FileManager.default.contentsOfDirectory(
-            at: root, includingPropertiesForKeys: nil
-        ) else { return }
-
         let fm = FileManager.default
-        var pending: [URL] = []
-        var transcribed: Set<URL> = []
-        for dir in entries {
-            if fm.fileExists(atPath: dir.appendingPathComponent(SessionFiles.transcript).path) {
-                // Transcribed, unless the readable rendering is missing:
-                // transcript.json is written last precisely so that it means
-                // "finished", but a session transcribed before that ordering
-                // was fixed can have the JSON and nothing anyone can
-                // double-click. Re-render it from the data rather than
-                // transcribing the audio again.
-                Transcript.restoreReadable(in: dir)
-                transcribed.insert(dir)
-            }
-            // A folder counts as a session if it stopped cleanly or still has
-            // media in it. No meta.json means the process died before it could
-            // stop cleanly; the audio is still good, since CAF needs no
-            // finalization pass, so recover it rather than orphaning it
-            // forever. (the video will be unplayable in that case; mp4 does
-            // need finalizing. It's still recorded in the metadata.)
-            if fm.fileExists(atPath: dir.appendingPathComponent(SessionFiles.meta).path)
-                || !sessionFiles(in: dir).isEmpty
-            {
-                pending.append(dir)
-            }
+        // What counts as a session (meta.json, or media still on disk: a
+        // process that died before it could stop cleanly leaves good CAF
+        // audio behind, so it is recovered rather than orphaned) is
+        // `SessionScan.isSession`'s call; the walk only returns such folders.
+        let pending = SessionScan.sessionFolders(under: root)
+        if !pending.isEmpty {
+            Log.info("found \(pending.count) session folder(s) under \(root.path)")
         }
-        pending.sort { $0.lastPathComponent < $1.lastPathComponent }
+        var transcribed: Set<URL> = []
+        for dir in pending where fm.fileExists(atPath: dir.appendingPathComponent(SessionFiles.transcript).path) {
+            // Transcribed, unless the readable rendering is missing:
+            // transcript.json is written last precisely so that it means
+            // "finished", but a session transcribed before that ordering
+            // was fixed can have the JSON and nothing anyone can
+            // double-click. Re-render it from the data rather than
+            // transcribing the audio again.
+            Transcript.restoreReadable(in: dir)
+            transcribed.insert(dir)
+        }
 
         let transcribing = Config.current.transcriptionEnabled
         var resumed = 0

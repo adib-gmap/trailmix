@@ -325,8 +325,10 @@ final class AppController {
         // on its way out and `shutdown()` is already awaiting whatever was in
         // flight, so a click landing now would start a recording nothing will
         // ever stop.
-        // While the display picker is up, the shortcut or the menu row means
-        // "never mind": the picker is dismissed and startSession() returns.
+        // While the name prompt or the display picker is up, the shortcut or
+        // the menu row means "never mind": it is dismissed and startSession()
+        // returns.
+        if SessionNamePrompt.cancelActive() { return }
         if DisplayPicker.cancelActive() { return }
         guard !busy, !terminating else { return }
         busy = true
@@ -356,6 +358,20 @@ final class AppController {
             return
         }
 
+        // What is this recording? Asked first, before the screen chooser, so
+        // the typing happens while nothing is recording and a cancel costs
+        // nothing. The answer names the session folder (see SessionNaming);
+        // the folder itself is only created once both dialogs are through.
+        let config = Config.current
+        var folder: SessionNaming.Folder?
+        if config.namePrompt {
+            guard let request = await SessionNamePrompt.ask(root: root, layout: config.sopLayout) else {
+                Log.info("recording cancelled at the name prompt")
+                return
+            }
+            folder = SessionNaming.folder(for: request, layout: config.sopLayout, date: Date())
+        }
+
         // Which screen? With more than one attached, ask every time the way
         // the system recorder does, since the menu's saved choice is whatever
         // was picked last and the wrong one is only obvious once the recording
@@ -375,8 +391,9 @@ final class AppController {
         do {
             newSession = try RecordingSession(
                 root: root,
+                folder: folder,
                 sources: sources,
-                capture: Config.current.capture
+                capture: config.capture
             )
         } catch {
             Log.warn("recording start failed: \(error)")

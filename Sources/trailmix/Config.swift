@@ -11,7 +11,10 @@ import Foundation
 ///       "max_recording_hours": 8,
 ///       "hotkey": "cmd+shift+7",
 ///       "pause_hotkey": "cmd+shift+2",
-///       "on_stop": "my-hook"
+///       "on_stop": "my-hook",
+///       "name_prompt": true,
+///       "sop_root": "OCR R&M-Role.Object.Step.Descrip.Date",
+///       "sop_drafts": "Need To build SOP"
 ///     }
 ///
 /// Parsed once at startup, not per accessor. The source selections are read
@@ -76,6 +79,19 @@ struct Config: Sendable {
     /// "Devices" window does, which is why this is configurable.
     var pauseHotkey: String
     var onStop: String?
+    /// Ask "Video used for training?" when a recording starts and name the
+    /// session folder from the answer (see `SessionNaming`). Off restores the
+    /// timestamp names and no window.
+    var namePrompt: Bool
+    /// The SOP library folder under the recordings root, and its drafts
+    /// folder, where training recordings land. Read-only; blanks fall back
+    /// to the defaults.
+    var sopRoot: String
+    var sopDrafts: String
+
+    var sopLayout: SessionNaming.Layout {
+        SessionNaming.Layout(sopRoot: sopRoot, drafts: sopDrafts).effective
+    }
 
     static let path = Paths.config
 
@@ -92,7 +108,10 @@ struct Config: Sendable {
         maxRecordingHours: 8,
         hotkey: "cmd+shift+7",
         pauseHotkey: "cmd+shift+2",
-        onStop: nil
+        onStop: nil,
+        namePrompt: true,
+        sopRoot: SessionNaming.Layout.default.sopRoot,
+        sopDrafts: SessionNaming.Layout.default.drafts
     )
 
     /// The process-wide config, parsed on first access. A malformed file is
@@ -155,6 +174,15 @@ struct Config: Sendable {
         }
         if let cmd = json["on_stop"] as? String, !cmd.isEmpty {
             config.onStop = cmd
+        }
+        if let prompt = json["name_prompt"] as? Bool {
+            config.namePrompt = prompt
+        }
+        if let name = json["sop_root"] as? String, !SessionNaming.sanitize(name).isEmpty {
+            config.sopRoot = name
+        }
+        if let name = json["sop_drafts"] as? String, !SessionNaming.sanitize(name).isEmpty {
+            config.sopDrafts = name
         }
         return config
     }

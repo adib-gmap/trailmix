@@ -73,6 +73,44 @@ struct ResumePendingTests {
         }
     }
 
+    /// Training recordings sit four levels down since the naming prompt. A
+    /// scan that stops at the root's children would never see one again
+    /// after a crash: no mix, no transcript, no recovered meta.json. Same
+    /// shape as the test above (transcribed, so nothing is queued and no
+    /// model is loaded), only the folder is nested.
+    @Test("a session under the SOP drafts tree is found and repaired")
+    func nestedSessionIsStillMixed() async throws {
+        try await SessionFixtures.inTemporaryDirectory { root in
+            let dir = try session(
+                in: root,
+                named: "OCR R&M-Role.Object.Step.Descrip.Date/Need To build SOP/EBOS-Estimate/Bidding-pt1.9.30.26"
+            )
+            try SessionFixtures.writeAudio(
+                to: dir.appendingPathComponent(SessionFiles.mic), seconds: 1
+            )
+            try SessionFixtures.writeAudio(
+                to: dir.appendingPathComponent(SessionFiles.system), seconds: 1
+            )
+            try SessionFixtures.writeMeta(
+                to: dir,
+                files: ["mic": SessionFiles.mic, "system": SessionFiles.system],
+                offsets: ["mic": 0, "system": 0]
+            )
+            try writeTranscript(in: dir)
+
+            let coordinator = TranscriptionCoordinator()
+            await coordinator.resumePending(root: root)
+
+            #expect(
+                await SessionFixtures.hasPlayableAudio(
+                    dir.appendingPathComponent(SessionFiles.mixedAudio)
+                ),
+                "the nested session was never found"
+            )
+            #expect(await coordinator.queuedCount == 0, "it already has a transcript")
+        }
+    }
+
     /// The mix guard belongs to `Mixdown.run` alone. `repairMixedFiles` used to
     /// keep its own copy, testing existence where the real one tests
     /// readability, and a duplicated guard that disagrees is worse than no
