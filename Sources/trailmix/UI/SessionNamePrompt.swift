@@ -73,7 +73,7 @@ final class SessionNamePrompt: NSObject {
         // behaviour lets it show over a full-screen Meet.
         window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 820, height: 460),
-            styleMask: [.titled, .closable],
+            styleMask: [.titled, .closable, .resizable],
             backing: .buffered,
             defer: false
         )
@@ -85,6 +85,36 @@ final class SessionNamePrompt: NSObject {
         window.isReleasedWhenClosed = false
         window.delegate = self
         window.contentView = buildContent()
+        window.contentMinSize = Self.baseSize
+    }
+
+    private static let baseSize = NSSize(width: 820, height: 460)
+    /// Window chrome outside the folder list: margins, the 360-wide form, the
+    /// gap between the columns.
+    private static let besideTree: CGFloat = 20 + 360 + 20 + 20
+
+    /// Widen the window so the longest folder name in the library shows in
+    /// full, up to the width of the screen it opens on. Recomputed on every
+    /// show because the library grows; never narrower than the base size.
+    private func fitWidthToLibrary() {
+        let screen = (NSScreen.main ?? NSScreen.screens.first)?.visibleFrame.width ?? Self.baseSize.width
+        let tree = library.map { Self.widestRow($0, depth: 0) } ?? 0
+        // Scroller, bezel border, and a little air after the last letter.
+        let wanted = Self.besideTree + tree + 15 + 4 + 12
+        let width = min(max(Self.baseSize.width, ceil(wanted)), screen - 40)
+        let height = window.contentRect(forFrameRect: window.frame).height
+        window.setContentSize(NSSize(width: width, height: max(height, Self.baseSize.height)))
+    }
+
+    /// The width a row and its descendants need: indentation and disclosure
+    /// triangle, the 16 pt icon with its padding (see `makeCell`), and the
+    /// name in the font `viewFor` gives it.
+    private static func widestRow(_ node: SOPNode, depth: Int) -> CGFloat {
+        let heading = node.kind == .drafts || node.kind == .sopRoot
+        let font = heading ? NSFont.systemFont(ofSize: 12, weight: .semibold) : NSFont.systemFont(ofSize: 12)
+        let text = (node.name as NSString).size(withAttributes: [.font: font]).width
+        let own = CGFloat(depth) * 14 + 20 + 2 + 16 + 4 + text + 2 + 6
+        return node.children.reduce(own) { max($0, widestRow($1, depth: depth + 1)) }
     }
 
     // MARK: - Showing and finishing
@@ -93,6 +123,7 @@ final class SessionNamePrompt: NSObject {
         previousApp = NSWorkspace.shared.frontmostApplication
         library = SOPTree.read(root: root, layout: layout)
         reloadTree()
+        fitWidthToLibrary()
         reloadCompletions()
         yesButton.state = .on
         noButton.state = .off
@@ -275,7 +306,22 @@ final class SessionNamePrompt: NSObject {
         let columns = NSStackView(views: [left, right])
         columns.orientation = .horizontal
         columns.alignment = .top
+        // .fill, not the default gravity areas: the form keeps its fixed 360
+        // and the folder list takes every point the window is widened by
+        // (`fitWidthToLibrary`, or a drag). With gravity areas the window
+        // grew and the list stayed put, leaving an empty strip.
+        columns.distribution = .fill
         columns.spacing = 20
+        left.setContentHuggingPriority(.required, for: .horizontal)
+        right.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        treeScroll.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        // An NSGridView has no intrinsic height, so nothing stopped the form
+        // being stretched to the height of the list, and the grid handed the
+        // extra to its first row: a tall gap under Role. This pulls the form
+        // down to the height its rows need, below every content priority.
+        let tight = left.heightAnchor.constraint(equalToConstant: 0)
+        tight.priority = NSLayoutConstraint.Priority(300)
+        tight.isActive = true
         columns.translatesAutoresizingMaskIntoConstraints = false
 
         startButton.target = self
@@ -392,6 +438,9 @@ extension SessionNamePrompt: NSOutlineViewDataSource, NSOutlineViewDelegate {
         let id = NSUserInterfaceItemIdentifier("node")
         let cell = outlineView.makeView(withIdentifier: id, owner: nil) as? NSTableCellView ?? Self.makeCell(id)
         cell.textField?.stringValue = node.name
+        // The full name on hover, for a name longer than even the widened
+        // window (a narrow screen caps it).
+        cell.toolTip = node.name
         cell.imageView?.image = node.kind == .session ? Self.sessionIcon : Self.folderIcon
         let heading = node.kind == .drafts || node.kind == .sopRoot
         cell.textField?.font = heading ? NSFont.systemFont(ofSize: 12, weight: .semibold) : NSFont.systemFont(ofSize: 12)
