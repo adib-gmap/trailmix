@@ -14,7 +14,8 @@ import Foundation
 ///       "on_stop": "my-hook",
 ///       "name_prompt": true,
 ///       "sop_root": "OCR R&M-Role.Object.Step.Descrip.Date",
-///       "sop_drafts": "Need To build SOP"
+///       "sop_drafts": "Need To build SOP",
+///       "shrink": { "enabled": true, "max_height": 1440, "video_kbps": 1500, "audio_kbps": 128 }
 ///     }
 ///
 /// Parsed once at startup, not per accessor. The source selections are read
@@ -88,6 +89,10 @@ struct Config: Sendable {
     /// to the defaults.
     var sopRoot: String
     var sopDrafts: String
+    /// Re-encode each recording's video smaller after stop (see `Shrink`);
+    /// nil keeps the full-resolution file. `"shrink": false` or
+    /// `"enabled": false` turns it off.
+    var shrink: Shrink.Settings?
 
     var sopLayout: SessionNaming.Layout {
         SessionNaming.Layout(sopRoot: sopRoot, drafts: sopDrafts).effective
@@ -111,7 +116,8 @@ struct Config: Sendable {
         onStop: nil,
         namePrompt: true,
         sopRoot: SessionNaming.Layout.default.sopRoot,
-        sopDrafts: SessionNaming.Layout.default.drafts
+        sopDrafts: SessionNaming.Layout.default.drafts,
+        shrink: .default
     )
 
     /// The process-wide config, parsed on first access. A malformed file is
@@ -183,6 +189,11 @@ struct Config: Sendable {
         }
         if let name = json["sop_drafts"] as? String, !SessionNaming.sanitize(name).isEmpty {
             config.sopDrafts = name
+        }
+        if let off = json["shrink"] as? Bool, !off {
+            config.shrink = nil
+        } else if let shrink = json["shrink"] as? [String: Any] {
+            config.shrink = (shrink["enabled"] as? Bool ?? true) ? Shrink.Settings(json: shrink) : nil
         }
         return config
     }

@@ -26,7 +26,7 @@ struct Trailmix: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "trailmix",
         abstract: "Local recorder + transcriber. Captures computer audio, microphone, and a window or display, then transcribes on-device.",
-        subcommands: [Run.self, Doctor.self, Mic.self, TimerCheck.self],
+        subcommands: [Run.self, Doctor.self, Mic.self, TimerCheck.self, ShrinkFile.self],
         defaultSubcommand: Run.self
     )
 }
@@ -577,10 +577,13 @@ final class AppController {
         // The mix runs first so the playable file exists by the time the
         // "transcript ready" notification invites the user into the folder.
         // `Remux.finalize` swaps the mix into the video and cuts out whatever
-        // was recorded while paused.
+        // was recorded while paused; `Shrink.run` then re-encodes it smaller,
+        // before transcription so "transcript ready" still means the folder
+        // is finished and safe to move.
         Task { [transcription] in
             await Mixdown.run(in: dir)
             await Remux.finalize(in: dir)
+            await Shrink.run(in: dir)
             await transcription.enqueue(dir)
         }
     }

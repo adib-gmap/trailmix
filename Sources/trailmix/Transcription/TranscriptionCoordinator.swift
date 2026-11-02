@@ -316,6 +316,8 @@ actor TranscriptionCoordinator {
         // hard-killed session's video is unfinalized and unreadable, so it
         // warns and leaves it alone, which is the honest outcome.
         await Remux.finalize(in: dir)
+        // Then smaller, if the session asked for it at stop (`Shrink`).
+        await Shrink.run(in: dir)
     }
 
     private func transcribe(_ dir: URL) async throws {

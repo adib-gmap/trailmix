@@ -142,6 +142,12 @@ final class RecordingSession {
                 "video": sources.target.capturesVideo,
             ],
         ]
+        // Asked for here, at stop, and carried out by `Shrink.run` after the
+        // remux. Sessions without it (everything recorded before shrinking
+        // existed, and video-less ones) are never re-encoded by recovery.
+        if sources.target.capturesVideo, let shrink = Config.current.shrink {
+            meta[Shrink.requestKey] = shrink.json
+        }
         if let reason = stream.unexpectedStopReason {
             meta["stopped_unexpectedly"] = reason
         }
